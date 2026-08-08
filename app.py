@@ -73,6 +73,12 @@ def correct(df: pd.DataFrame) -> pd.DataFrame:
         d[f"{col}_n"] = pct_rank(d[col])
     d["population_n"] = pct_rank(d["population_total"])
 
+    # Team decision: follow model_pipeline.py, where logistics_difficulty is a
+    # divisor — harder to reach means lower priority, because installation and
+    # mobilisation cost more. Inverted here so the additive score keeps that
+    # direction.
+    d["access_ease_n"] = 1.0 - d["logistics_difficulty_n"]
+
     # Signed residual recovered from the shipped columns. The supplied
     # underperformance_residual is floored at 1.0 for ~53% of rows.
     d["residual_signed"] = d["download_kbps"] - d["cv_predicted_speed"]
@@ -96,7 +102,7 @@ def score(d: pd.DataFrame, w: dict) -> pd.Series:
     raw = (
         w["offgrid"] * d["off_grid_likelihood_n"]
         + w["solar"] * d["solar_viability_n"]
-        + w["logistics"] * d["logistics_difficulty_n"]
+        + w["logistics"] * d["access_ease_n"]
         + w["population"] * d["population_n"]
         + w["residual"] * d["residual_n"]
     ) / total
@@ -106,6 +112,36 @@ def score(d: pd.DataFrame, w: dict) -> pd.Series:
 def ramp(v) -> list:
     v = np.clip(np.nan_to_num(np.asarray(v, float)), 0, 1)
     return [[int(245 - 215 * x), int(160 + 30 * x), int(40 + 90 * x), 200] for x in v]
+
+
+def legend_html() -> str:
+    stops = [ramp([x])[0] for x in (0.0, 0.25, 0.5, 0.75, 1.0)]
+    swatches = "".join(
+        f'<span style="display:inline-block;width:34px;height:12px;'
+        f'background:rgb({c[0]},{c[1]},{c[2]})"></span>' for c in stops
+    )
+    return f"""
+<div style="display:flex;flex-wrap:wrap;gap:26px;align-items:center;
+            padding:10px 0 2px 0;font-size:13px;line-height:1.4">
+  <div>
+    <div style="display:flex;align-items:center;gap:8px">
+      <span style="opacity:.7">lower</span>{swatches}<span style="opacity:.7">higher</span>
+    </div>
+    <div style="opacity:.7;margin-top:3px">priority — colour and size both encode it</div>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <svg width="18" height="18"><circle cx="9" cy="9" r="7" fill="none"
+      stroke="currentColor" stroke-width="1.8" opacity="0.85"/></svg>
+    <span>ringed = on the shortlist</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <svg width="18" height="18"><circle cx="9" cy="9" r="3.2" fill="currentColor"
+      opacity="0.5"/></svg>
+    <span>one dot = one ~610 m tile, not one tower</span>
+  </div>
+  <div style="opacity:.75">gaps inside the border = no measurement, not no coverage</div>
+</div>
+"""
 
 
 def outline_layer(country_key):
@@ -139,13 +175,14 @@ st.sidebar.caption("Move these live during the pitch. This is the sensitivity an
 w = dict(
     offgrid=st.sidebar.slider("Off-grid likelihood", 0.0, 1.0, 0.45, 0.05),
     solar=st.sidebar.slider("Solar viability", 0.0, 1.0, 0.25, 0.05),
-    logistics=st.sidebar.slider("Logistics difficulty", 0.0, 1.0, 0.20, 0.05),
+    logistics=st.sidebar.slider("Ease of access", 0.0, 1.0, 0.20, 0.05),
     residual=st.sidebar.slider("Service shortfall", 0.0, 1.0, 0.10, 0.05),
     population=st.sidebar.slider("Population served", 0.0, 1.0, 0.00, 0.05),
 )
 st.sidebar.caption(
-    "Population defaults to 0. Weighting it pulls dense cities to the top, which is "
-    "the opposite of an off-grid diesel problem."
+    "Ease of access raises priority — installation and mobilisation cost dominate at "
+    "screening stage. Population defaults to 0: weighting it pulls dense cities to the "
+    "top, which is the opposite of an off-grid diesel problem."
 )
 
 st.sidebar.subheader("Filters")
@@ -205,7 +242,7 @@ with tab_map:
                  height=MAP_HEIGHT),
         use_container_width=True,
     )
-    st.caption("Colour and size encode priority. Ringed points are the current shortlist.")
+    st.markdown(legend_html(), unsafe_allow_html=True)
 
     st.subheader("Inspect a site")
     if len(shortlist):
@@ -218,10 +255,10 @@ with tab_map:
         with a:
             st.markdown("**Why it ranks here**")
             contrib = pd.DataFrame({
-                "factor": ["Off-grid likelihood", "Solar viability", "Logistics difficulty",
+                "factor": ["Off-grid likelihood", "Solar viability", "Ease of access",
                            "Service shortfall", "Population"],
                 "percentile": [row.off_grid_likelihood_n, row.solar_viability_n,
-                               row.logistics_difficulty_n, row.residual_n, row.population_n],
+                               row.access_ease_n, row.residual_n, row.population_n],
                 "weight": [w["offgrid"], w["solar"], w["logistics"], w["residual"], w["population"]],
             })
             contrib["contribution"] = (contrib.percentile * contrib.weight).round(3)
@@ -318,6 +355,17 @@ with tab_model:
             map_style=BASEMAP, height=MAP_HEIGHT),
         use_container_width=True,
     )
+    st.markdown(
+        legend_html().replace(
+            "priority — colour and size both encode it",
+            "size of shortfall — how far below prediction the tile performs",
+        ).replace(
+            '<div style="display:flex;align-items:center;gap:8px">\n    <svg width="18" height="18"><circle cx="9" cy="9" r="7" fill="none"\n      stroke="currentColor" stroke-width="1.8" opacity="0.85"/></svg>\n    <span>ringed = on the shortlist</span>\n  </div>', ""
+        ),
+        unsafe_allow_html=True,
+    )
+    st.caption(f"Only the {data.underperforming.sum():,} underperforming tiles are drawn. "
+               "Tiles at or above prediction are omitted — they are not a problem to solve.")
 
     st.subheader("Fairness — does the model work equally well everywhere?")
     fair = data.assign(abs_err=data.residual_signed.abs()).groupby("demographic_stratum").agg(
@@ -356,7 +404,25 @@ with tab_cov:
             map_style=BASEMAP, height=MAP_HEIGHT),
         use_container_width=True,
     )
-    st.caption("Outline is the national boundary. Every gap inside it is a tile we cannot assess.")
+    st.markdown(
+        """
+<div style="display:flex;flex-wrap:wrap;gap:26px;align-items:center;
+            padding:10px 0 2px 0;font-size:13px">
+  <div style="display:flex;align-items:center;gap:8px">
+    <svg width="18" height="18"><circle cx="9" cy="9" r="4" fill="rgb(30,130,120)"
+      opacity="0.75"/></svg>
+    <span>a tile with enough evidence to assess</span>
+  </div>
+  <div style="display:flex;align-items:center;gap:8px">
+    <svg width="26" height="18"><rect x="1" y="4" width="24" height="11" fill="none"
+      stroke="currentColor" stroke-width="1.2" opacity="0.55"/></svg>
+    <span>national boundary</span>
+  </div>
+  <div style="opacity:.75">every gap inside the boundary is a place we cannot assess</div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
 
     st.bar_chart(data.groupby("demographic_stratum")["tests"].median(),
                  y_label="median Ookla tests", x_label="settlement type")
@@ -392,6 +458,13 @@ with tab_audit:
 - **Rows are Ookla zoom-16 tiles, not tower sites.** `site_id` is a 16-character quadkey.
 - **Off-grid status is inferred** from night-lights and road/power proximity, not utility
   records. Every row is a candidate requiring operator confirmation.
+- **Ease of access biases the shortlist away from the hardest terrain.** Following the
+  pipeline's convention, remote sites rank lower because installation costs more. That
+  drops East Malaysia's share of the top 50 from 26% to 10% — so this is a first-wave
+  list, not a complete one. The hardest Sabah and Sarawak sites need a different
+  instrument, and that is in the roadmap.
+- `logistics_difficulty` is clipped at 0.1 and **50.9% of tiles sit on that floor**, so
+  ease of access cannot separate half the dataset.
 - `essential_service_weight` is 50.0 for over 75% of rows and `antenna_count` reaches
   43,394 on a single tile — both look like join artefacts and are excluded from scoring.
         """

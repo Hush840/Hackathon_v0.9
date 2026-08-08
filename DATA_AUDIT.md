@@ -2,8 +2,75 @@
 
 Run against Member 1 and Member 2's delivered files, 8 Aug 2026.
 Malaysia: 2,815 rows · Indonesia: 3,482 · Singapore: 145.
+Updated after reviewing `models/model_pipeline.py` in the team repo.
 
-Six issues. Four are fixed in the dashboard's correction layer; two need a re-export.
+---
+
+## Headline: the data is older than the code
+
+`model_pipeline.py` min-max normalises `priority_score` to 0–100 and adds a
+`national_rank` column. **Our parquet files have neither** — scores run to
+1.17 × 10¹⁰ and `national_rank` is absent. The files we are building on were
+produced by an earlier version of the script.
+
+**Re-running the current pipeline is the single highest-value action available.**
+It fixes the score range and adds `national_rank` for free.
+
+Note also that the script writes to `data/jendela_phase2_esg_scored.parquet`,
+but our files are named `..._matrix_<country>.parquet`. Worth confirming with
+the team which artefact is authoritative.
+
+---
+
+## Why the score misbehaves — root cause found
+
+```python
+numerator = (abatement * off_grid_likelihood * solar_viability) \
+            * (population_total + essential_service_weight) \
+            * underperformance_residual
+raw_score = numerator / logistics_difficulty
+```
+
+**The score is multiplicative across five unbounded terms.** That is the whole
+problem. Min-max normalising afterwards makes the range 0–100 but not the
+*distribution* — it stays so skewed that almost every site lands near zero and a
+handful near 100. Re-running alone will not make the ranking usable.
+
+**Fix:** combine percentile ranks additively with explicit weights, as the
+dashboard now does. Multiplying raw magnitudes lets one factor swamp the rest.
+
+### Which factor swamps it
+
+```python
+df['underperformance_residual'] = predicted - observed
+df['underperformance_residual'] = ...apply(lambda x: max(x, 1.0))
+```
+
+A site that is not underperforming multiplies by **1**. One that is can multiply
+by **75,000**. Meanwhile `off_grid_likelihood` only spans about 0.01 to 4.9. That
+single clamp is why the residual rank-correlates 0.898 with the final score and the
+ESG terms correlate below 0.13. The ESG project is being ranked almost entirely by
+one telecoms variable.
+
+### `off_grid_likelihood` is not a likelihood
+
+```python
+(distance_to_power_m / 5000)*0.5 + (distance_to_road_m / 2000)*0.3
++ (1.0 / (night_radiance + 0.1))*0.2
+```
+
+Unbounded on every term. A fully dark tile contributes `1/0.1 × 0.2 = 2.0` on its
+own. Hence the observed maximum of 4.94. If it is going to be named a likelihood —
+or multiplied by anything — it needs bounding.
+
+### `essential_service_weight` is decorative
+
+It adds **50** to `population_total`, whose median is 1,238. A roughly 4% nudge.
+The Social pillar is currently not doing meaningful work in the score.
+
+---
+
+Six data issues follow. Four are fixed in the dashboard's correction layer.
 
 ---
 
@@ -53,13 +120,26 @@ Consequence: `people_connected_per_tonne_co2` is exactly `population_total / 22.
 
 ## Needs a re-export from Member 2
 
-### 5. Only one confidence tier is present — the governance story is unshowable
+### 5. Only one confidence tier is present — and it is not Member 2's fault
 
-Every row reads `Sufficient Evidence - Ranked Screening Approved`. `inference_status` and `field_survey_triggered` are likewise single-valued. Minimum observed `tests` = 15, minimum `devices` = 5, so the evidence filter was applied **before** export and Tier 2 / Tier 3 rows were dropped.
+Every row reads `Sufficient Evidence - Ranked Screening Approved`.
 
-This matters more than anything else on the list. The handoff note presents the three-tier masking and the "Sabah & Sarawak blind spots" as a headline governance finding — but those rows are not in the file, so the dashboard cannot render them. Right now the map silently shows nothing where the story is strongest, which is the exact failure mode the tiering was designed to prevent.
+Member 2's `apply_governance_confidence_mask()` is **correct** — it assigns all three
+tiers and drops nothing:
 
-**Ask:** re-export without the tests/devices filter, keeping the tier label as a column.
+```python
+if row['tests'] >= 15 and row['devices'] >= 5:  'Sufficient Evidence...'
+elif row['tests'] > 0:                          'Thin Evidence - Masked...'
+else:                                           'No Data - Excluded'
+```
+
+But our data has minimum `tests` = 15 and minimum `devices` = 5, so **thin and
+no-data rows never reach the model at all.** The filter lives upstream in the ETL.
+
+**This ask goes to Member 1, not Member 2.** The extraction needs to keep tiles below
+the activity threshold so the masking layer has something to mask. Without them, the
+"Sabah and Sarawak blind spots" finding — the strongest governance point in the pitch —
+cannot be displayed, because the rows do not exist.
 
 ### 6. The evidence filter biases against the target population
 
@@ -102,20 +182,92 @@ The handoff note quotes 0.447, which matches **Indonesia**. If someone asks abou
 
 ---
 
+## Resolved: remoteness lowers priority
+
+**Team decision — the dashboard now follows `model_pipeline.py`.** Logistics
+difficulty reduces priority: harder to reach means mobilisation and installation cost
+more, so those sites are worse value per ringgit. The slider is labelled **Ease of
+access** and the underlying percentile is inverted so the additive score preserves
+Member 2's direction.
+
+### What that decision cost and bought
+
+Top 50 for Malaysia, at weights 0.45 / 0.25 / 0.20 / 0.10 / 0.00:
+
+| | Rural | Peri-urban | Urban | East Malaysia | Median distance to road |
+|---|---|---|---|---|---|
+| Difficulty **raises** priority | 23 | 23 | 4 | 26% | 1,023 m |
+| Difficulty **lowers** priority (chosen) | **38** | 10 | 2 | **10%** | **103 m** |
+
+Only **5 of 50 sites appear on both lists** — this is not a tweak, it is a different
+shortlist.
+
+**Bought:** a markedly more rural shortlist (38 vs 23) and a clean ROI story — rural,
+off-grid, sunny, and cheap to install.
+
+**Cost:** East Malaysia's share drops from 26% to 10%, which weakens the JENDELA
+Phase 2 alignment, since Phase 2 explicitly prioritises Sabah and Sarawak precisely
+*because* they are hard to reach.
+
+**Say this before a judge finds it:** "We rank easy-access sites higher because
+installation cost dominates at this stage. That biases us away from the hardest parts
+of Sabah and Sarawak, which is exactly where JENDELA Phase 2 is focused — so this is a
+first-wave list, not a complete one. The hard sites need a different instrument, and
+that's in our roadmap."
+
+That answer is stronger than pretending the trade-off doesn't exist.
+
+### One caveat on the factor itself
+
+`logistics_difficulty` is clipped at 0.1 in the pipeline, and **50.9% of Malaysian
+tiles sit exactly on that floor.** Ease of access therefore cannot separate half the
+dataset — within that tied group the ranking is decided entirely by the other three
+factors. The clip should be removed or the floor lowered on the next re-run.
+
+## Two more things in the repo
+
+- **`run_pipeline()` reads `parquet_files[0]`** — whichever file `glob` happens to
+  return first — and always writes to the same output name. Running it for a second
+  country silently overwrites the first. Fine for a hackathon, worth knowing before
+  someone re-runs it on Tuesday.
+- **The data files are gitignored.** The README says they are "excluded from version
+  control due to file size" and live on Google Drive. But the three matrices total
+  **5.2 MB** — trivially committable. See the deployment note below.
+
+## Deployment blocker
+
+Streamlit Community Cloud builds from the GitHub repo only. If the parquet files are
+not committed, **the deployed app crashes on startup with a file-not-found**, no
+matter how well it runs locally.
+
+Repo currently contains `data_pipeline/`, `models/`, `notebook/`, `.gitignore`,
+`README.md`. There is no `app/` and no root `requirements.txt`, so the dashboard
+folder slots in without collision. Needed:
+
+1. Commit `data/jendela_phase2_esg_matrix_*.parquet` (5.2 MB — add a negation rule to
+   `.gitignore`)
+2. Add `requirements.txt` at the repo root
+3. Streamlit Cloud main file path: `app/app.py`
+
 ## Message to send Member 2
 
-> Great work getting this through — the spatial blocking and the caveats list are exactly right, and the three-country output is a gift for the scalability slide.
+> Great work on this — the spatial blocking is properly done, the caveats list is exactly right, and having three countries makes the scalability slide write itself.
 >
-> I hit four things while wiring the dashboard, and there are two I can't fix downstream.
+> I read through `model_pipeline.py` while wiring the dashboard. Main thing: **the parquet files we're working from are older than your code.** Your script normalises `priority_score` to 0–100 and adds `national_rank`; our files have scores up to 1.17e10 and no `national_rank`. So a re-run gets us both for free. Can you regenerate?
 >
-> **Can't fix in the app:**
+> Three things I'd change while you're in there:
 >
-> 1. **All 2,815 rows have the same `confidence_tier`.** Min tests = 15, min devices = 5, so the evidence filter ran before export and Tier 2/Tier 3 rows aren't in the file. That means the Sabah/Sarawak masking — our strongest governance point — can't be displayed. Could you re-export unfiltered with the tier label kept as a column?
-> 2. **Signed residual, please.** `underperformance_residual` is floored at 1.0 for 53% of rows, so we've lost the direction. Raw `observed − predicted` would let us actually show underperformance.
+> 1. **The score is multiplicative across five unbounded terms**, so min-max afterwards fixes the range but not the skew — almost everything lands near zero. Additive percentile ranks with explicit weights would behave much better. That's what the dashboard does now, so we can compare.
+> 2. **`max(residual, 1.0)` is what makes the residual dominate.** Non-underperformers multiply by 1, underperformers by up to 75,000, while `off_grid_likelihood` only spans 0.01–4.9. Net effect: the residual rank-correlates 0.90 with the final score and every ESG term sits below 0.13. We're ranking an ESG project almost entirely on one telecoms variable.
+> 3. **`off_grid_likelihood` is unbounded** — a fully dark tile gets `1/0.1 × 0.2 = 2.0` from the radiance term alone, hence the max of 4.94. Worth bounding if we're calling it a likelihood.
 >
-> **Already handled in the dashboard, flagging so the numbers match your notebook:**
+> Also: `indicative_abatement_tco2e_yr` is a flat 22.23 for every row, which makes `people_connected_per_tonne_co2` exactly population ÷ 22.23. I've probability-weighted it by off-grid likelihood in the dashboard so carbon actually varies between sites — happy for that to move upstream if you'd rather own it.
 >
-> 3. `priority_score` comes through at 189 → 1.17e10 rather than 0–100, and rank-correlates 0.90 with the residual alone — the ESG terms are barely moving it. I rebuilt it from percentile ranks with visible weights.
-> 4. `indicative_abatement_tco2e_yr` is constant at 22.23 for every row, which makes `people_connected_per_tonne_co2` equal to population ÷ 22.23. I've probability-weighted abatement by off-grid likelihood so carbon actually varies. Happy to move that upstream if you'd rather own it.
+> One for the whole team: `logistics_difficulty` is a divisor in your score, so remote sites rank *lower*. I had it raising priority, on the logic that diesel delivery is what costs money. Both are defensible and they partly cancel — but we should agree which way it goes before someone asks.
+
+## Message to send Member 1
+
+> Two things on the extraction, both small:
 >
-> One thing worth a team decision: with population weighted in the score, our top 10 sites are all Klang Valley and the top 100 has zero rural tiles. Setting population weight to zero gives 43 rural / 36 peri-urban / 21 urban and doubles East Malaysia's share. I've defaulted the dashboard to that and left the weights as live sliders so we can show the sensitivity on stage.
+> 1. **Can the ETL keep tiles below the activity threshold?** Everything in our matrices has `tests >= 15` and `devices >= 5`, so Dhanya's three-tier masking never sees a thin or no-data row — all 2,815 come back as "Sufficient Evidence". That means our Sabah/Sarawak blind-spot finding, which is probably the strongest governance point we have, can't be shown on the map. We need the thin rows present *and labelled*, not filtered out.
+> 2. **Can we commit the three `.parquet` matrices to the repo?** The README has them gitignored for size, but they're only 5.2 MB total. Streamlit Community Cloud builds straight from GitHub, so without them the deployed dashboard crashes on startup — it can't reach Google Drive. The big files (`cell_towers.csv.gz`, the rasters) should absolutely stay out.
