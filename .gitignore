@@ -1,0 +1,33 @@
+# Large geospatial source data — never commit
+*.tif
+*.tiff
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.sbn
+*.sbx
+*.prj
+cell_towers_*.csv
+
+# Keep the scored matrices — they are small and the app needs them
+!data/jendela_phase2_esg_matrix_*.parquet
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Secrets
+.streamlit/secrets.toml
+*.env
+service_account*.json
