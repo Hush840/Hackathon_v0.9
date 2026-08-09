@@ -15,19 +15,23 @@ import pydeck as pdk
 import streamlit as st
 
 DATA_DIR = Path(__file__).parent / "data"
-COUNTRIES = {"Malaysia": "malaysia", "Indonesia": "indonesia", "Singapore": "singapore"}
-GEOJSON_NAME = {"malaysia": "Malaysia", "indonesia": "Indonesia", "singapore": "Singapore"}
+MATRIX_GLOB = "jendela_phase2_esg_matrix_*.parquet"
+
+# Filename stem -> the Country value used in Asean.geojson
+GEOJSON_NAME = {
+    "malaysia": "Malaysia", "indonesia": "Indonesia", "singapore": "Singapore",
+    "thailand": "Thailand", "vietnam": "Vietnam", "viet_nam": "Vietnam",
+    "myanmar": "Myanmar", "philippines": "Philippines", "cambodia": "Cambodia",
+    "laos": "Laos DR", "lao_pdr": "Laos DR", "brunei": "Brunei Darussalam",
+    "brunei_darussalam": "Brunei Darussalam",
+}
+
 
 DIESEL_KG_CO2_PER_L = 2.63
 BASELINE_LITRES = 13_000.0
 SOLAR_HYBRID_REDUCTION = 0.65
 ABATEMENT_FULL_TCO2E = BASELINE_LITRES * SOLAR_HYBRID_REDUCTION * DIESEL_KG_CO2_PER_L / 1000
 
-VIEWS = {
-    "malaysia": dict(lat=4.0, lon=109.5, zoom=5.2),
-    "indonesia": dict(lat=-2.0, lon=118.0, zoom=4.2),
-    "singapore": dict(lat=1.35, lon=103.82, zoom=10.5),
-}
 MAP_HEIGHT = 560
 BASEMAP = "https://basemaps.cartocdn.com/gl/positron-gl-style/style.json"
 
@@ -37,8 +41,30 @@ st.set_page_config(page_title="JENDELA Phase 2 — ESG triage", layout="wide")
 # ─────────────────────────────────────────────  data
 
 @st.cache_data(show_spinner=False)
+def matrix_paths() -> dict:
+    """Find every country matrix under data/, including subfolders.
+
+    If the same country appears more than once, the most recently modified file
+    wins — so dropping a fresh export into a subfolder supersedes an older copy
+    without anyone having to delete anything.
+    """
+    best: dict[str, Path] = {}
+    for p in DATA_DIR.rglob(MATRIX_GLOB):
+        key = p.stem.replace("jendela_phase2_esg_matrix_", "").lower()
+        if key not in best or p.stat().st_mtime > best[key].stat().st_mtime:
+            best[key] = p
+    return best
+
+
+@st.cache_data(show_spinner=False)
+def available_countries() -> dict:
+    """Label -> key. Adding a country is a file drop, nothing else."""
+    return {k.replace("_", " ").title(): k for k in sorted(matrix_paths())}
+
+
+@st.cache_data(show_spinner=False)
 def load(country_key: str) -> pd.DataFrame:
-    df = pd.read_parquet(DATA_DIR / f"jendela_phase2_esg_matrix_{country_key}.parquet")
+    df = pd.read_parquet(matrix_paths()[country_key])
     return df.drop(columns=[c for c in ("geometry", ".geo", "__index_level_0__") if c in df],
                    errors="ignore")
 
@@ -48,10 +74,21 @@ def boundary(country_key: str):
     path = DATA_DIR / "Asean.geojson"
     if not path.exists():
         return None
+    want = GEOJSON_NAME.get(country_key)
+    if want is None:
+        return None
     gj = json.loads(path.read_text())
-    want = GEOJSON_NAME[country_key]
     feats = [f for f in gj["features"] if f["properties"].get("Country") == want]
     return {"type": "FeatureCollection", "features": feats} if feats else None
+
+
+def view_for(df: pd.DataFrame) -> dict:
+    """Fit the camera to the data rather than hardcoding per country."""
+    lon_span = max(float(df.longitude.max() - df.longitude.min()), 0.05)
+    lat_span = max(float(df.latitude.max() - df.latitude.min()), 0.05)
+    zoom = np.log2(360.0 / max(lon_span, lat_span)) + 0.8
+    return dict(lat=float(df.latitude.mean()), lon=float(df.longitude.mean()),
+                zoom=float(np.clip(zoom, 2.5, 11.0)))
 
 
 def pct_rank(s: pd.Series) -> pd.Series:
@@ -92,7 +129,7 @@ def correct(df: pd.DataFrame) -> pd.DataFrame:
     d["expected_abatement_tco2e"] = ABATEMENT_FULL_TCO2E * d["off_grid_likelihood"].clip(0, 1)
     d["people_per_tonne_v2"] = d["population_total"] / d["expected_abatement_tco2e"].replace(0, np.nan)
 
-    d["region"] = np.where(d["longitude"] > 109, "East", "West")
+    d["region"] = np.where(d["longitude"] > 109, "East", "West")  # meaningful for Malaysia
     d["amenity_km"] = d["distance_to_amenity_m"] / 1000
     return d
 
@@ -114,32 +151,27 @@ def ramp(v) -> list:
     return [[int(245 - 215 * x), int(160 + 30 * x), int(40 + 90 * x), 200] for x in v]
 
 
-def legend_html() -> str:
+def legend_html(label: str = "priority", rings: bool = True) -> str:
     stops = [ramp([x])[0] for x in (0.0, 0.25, 0.5, 0.75, 1.0)]
     swatches = "".join(
-        f'<span style="display:inline-block;width:34px;height:12px;'
+        f'<span style="display:inline-block;width:30px;height:11px;'
         f'background:rgb({c[0]},{c[1]},{c[2]})"></span>' for c in stops
     )
+    ring = (
+        '<div style="display:flex;align-items:center;gap:7px">'
+        '<svg width="16" height="16"><circle cx="8" cy="8" r="6" fill="none" '
+        'stroke="currentColor" stroke-width="1.8" opacity="0.85"/></svg>'
+        "<span>shortlisted</span></div>"
+    ) if rings else ""
     return f"""
-<div style="display:flex;flex-wrap:wrap;gap:26px;align-items:center;
-            padding:10px 0 2px 0;font-size:13px;line-height:1.4">
-  <div>
-    <div style="display:flex;align-items:center;gap:8px">
-      <span style="opacity:.7">lower</span>{swatches}<span style="opacity:.7">higher</span>
-    </div>
-    <div style="opacity:.7;margin-top:3px">priority — colour and size both encode it</div>
+<div style="display:flex;flex-wrap:wrap;gap:22px;align-items:center;
+            padding:8px 0 2px 0;font-size:13px">
+  <div style="display:flex;align-items:center;gap:7px">
+    <span style="opacity:.7">low</span>{swatches}<span style="opacity:.7">high</span>
+    <span style="opacity:.7">{label}</span>
   </div>
-  <div style="display:flex;align-items:center;gap:8px">
-    <svg width="18" height="18"><circle cx="9" cy="9" r="7" fill="none"
-      stroke="currentColor" stroke-width="1.8" opacity="0.85"/></svg>
-    <span>ringed = on the shortlist</span>
-  </div>
-  <div style="display:flex;align-items:center;gap:8px">
-    <svg width="18" height="18"><circle cx="9" cy="9" r="3.2" fill="currentColor"
-      opacity="0.5"/></svg>
-    <span>one dot = one ~610 m tile, not one tower</span>
-  </div>
-  <div style="opacity:.75">gaps inside the border = no measurement, not no coverage</div>
+  {ring}
+  <div style="opacity:.7">1 dot = one ~610 m tile · gaps = no measurement</div>
 </div>
 """
 
@@ -155,23 +187,27 @@ def outline_layer(country_key):
 # ─────────────────────────────────────────────  sidebar
 
 st.sidebar.title("Controls")
-country_label = st.sidebar.selectbox("Country", list(COUNTRIES), index=0)
+COUNTRIES = available_countries()
+if not COUNTRIES:
+    st.error(f"No matrices found in {DATA_DIR}. Expected files named {MATRIX_GLOB}.")
+    st.stop()
+_default = list(COUNTRIES).index("Malaysia") if "Malaysia" in COUNTRIES else 0
+country_label = st.sidebar.selectbox("Country", list(COUNTRIES), index=_default)
 country = COUNTRIES[country_label]
 
 raw = load(country)
 data = correct(raw)
 
-if country == "singapore":
+if country in ("singapore", "brunei", "brunei_darussalam"):
     st.sidebar.warning(
-        "Singapore is a negative control, not a deployment target. It is ~100% "
-        "electrified, yet the off-grid proxy still fires — evidence the proxy needs "
-        "recalibration for dense urban areas. Use Indonesia for the scalability story."
+        "Negative control, not a target. Singapore is ~100% electrified yet the "
+        "off-grid proxy still fires — it needs recalibration for dense urban areas."
     )
 else:
     st.sidebar.caption("Same pipeline, different file. Nothing else changes.")
 
 st.sidebar.subheader("Priority weights")
-st.sidebar.caption("Move these live during the pitch. This is the sensitivity analysis.")
+st.sidebar.caption("Live — this is the sensitivity analysis.")
 w = dict(
     offgrid=st.sidebar.slider("Off-grid likelihood", 0.0, 1.0, 0.45, 0.05),
     solar=st.sidebar.slider("Solar viability", 0.0, 1.0, 0.25, 0.05),
@@ -179,11 +215,7 @@ w = dict(
     residual=st.sidebar.slider("Service shortfall", 0.0, 1.0, 0.10, 0.05),
     population=st.sidebar.slider("Population served", 0.0, 1.0, 0.00, 0.05),
 )
-st.sidebar.caption(
-    "Ease of access raises priority — installation and mobilisation cost dominate at "
-    "screening stage. Population defaults to 0: weighting it pulls dense cities to the "
-    "top, which is the opposite of an off-grid diesel problem."
-)
+st.sidebar.caption("Population is 0 on purpose — weighting it pulls dense cities to the top.")
 
 st.sidebar.subheader("Filters")
 strata = st.sidebar.multiselect(
@@ -191,17 +223,37 @@ strata = st.sidebar.multiselect(
     default=[s for s in ("rural", "peri-urban") if s in set(data["demographic_stratum"])],
 )
 top_n = st.sidebar.slider("Shortlist size", 10, 300, 50, 10)
+amenity_km_max = st.sidebar.slider(
+    "Max distance to school or clinic (km)", 0.1, 5.0, 5.0, 0.1,
+    help="5.0 keeps everything. The pipeline's own threshold is 2.5 km, but that "
+         "retains 96% of tiles — tighten below ~1 km to make it discriminate.",
+)
+
+st.sidebar.subheader("Map layers")
+COLOUR_BY = {
+    "Priority": ("priority_v2", "priority"),
+    "Off-grid likelihood": ("off_grid_likelihood", "off-grid likelihood"),
+    "Solar viability": ("solar_viability", "solar"),
+    "Distance to power": ("distance_to_power_m", "distance to power"),
+    "Distance to road": ("distance_to_road_m", "distance to road"),
+    "Population": ("population_total", "population"),
+}
+colour_choice = st.sidebar.selectbox("Colour sites by", list(COLOUR_BY), index=0)
+show_rings = st.sidebar.checkbox("Shortlist rings", value=True)
+show_border = st.sidebar.checkbox("National boundary", value=True)
 
 data["priority_v2"] = score(data, w)
 view = (data[data["demographic_stratum"].isin(strata)] if strata else data).copy()
+if amenity_km_max < 5.0:
+    view = view[view["amenity_km"] <= amenity_km_max]
 shortlist = view.nlargest(top_n, "priority_v2")
 
 # ─────────────────────────────────────────────  header
 
 st.title("JENDELA Phase 2 — solar conversion triage")
 st.caption(
-    f"{country_label} · {len(data):,} candidate tiles · pre-feasibility screening only · "
-    "every site listed requires operator confirmation and a field survey"
+    f"{country_label} · {len(data):,} candidate tiles · screening only — every site "
+    "requires operator confirmation and a field survey"
 )
 
 tabs = st.tabs(["Priority map", "Shortlist", "Model", "Evidence coverage",
@@ -219,22 +271,27 @@ with tab_map:
     c4.metric("East Malaysia share", f"{east:.0f}%",
               help="JENDELA Phase 2 prioritises Sabah and Sarawak")
 
+    col, col_label = COLOUR_BY[colour_choice]
     plot = view.copy()
-    plot["color"] = ramp(plot["priority_v2"] / 100)
+    plot["shade"] = pct_rank(plot[col])
+    plot["color"] = ramp(plot["shade"])
     plot["radius"] = 1200 + 5200 * (plot["priority_v2"] / 100) ** 2
 
-    v = VIEWS[country]
-    layers = outline_layer(country) + [
+    v = view_for(view if len(view) else data)
+    layers = (outline_layer(country) if show_border else []) + [
         pdk.Layer("ScatterplotLayer",
                   data=plot[["longitude", "latitude", "color", "radius", "priority_v2"]],
                   get_position=["longitude", "latitude"], get_fill_color="color",
                   get_radius="radius", radius_min_pixels=3.5, radius_max_pixels=26,
                   pickable=True, opacity=0.75),
-        pdk.Layer("ScatterplotLayer", data=shortlist[["longitude", "latitude"]],
-                  get_position=["longitude", "latitude"], get_fill_color=[0, 0, 0, 0],
-                  get_line_color=[20, 20, 20, 220], stroked=True, filled=False,
-                  line_width_min_pixels=1.6, get_radius=3200, radius_max_pixels=26),
     ]
+    if show_rings:
+        layers.append(
+            pdk.Layer("ScatterplotLayer", data=shortlist[["longitude", "latitude"]],
+                      get_position=["longitude", "latitude"], get_fill_color=[0, 0, 0, 0],
+                      get_line_color=[20, 20, 20, 220], stroked=True, filled=False,
+                      line_width_min_pixels=1.6, get_radius=3200, radius_max_pixels=26)
+        )
     st.pydeck_chart(
         pdk.Deck(layers=layers,
                  initial_view_state=pdk.ViewState(latitude=v["lat"], longitude=v["lon"], zoom=v["zoom"]),
@@ -242,7 +299,7 @@ with tab_map:
                  height=MAP_HEIGHT),
         use_container_width=True,
     )
-    st.markdown(legend_html(), unsafe_allow_html=True)
+    st.markdown(legend_html(col_label, rings=show_rings), unsafe_allow_html=True)
 
     st.subheader("Inspect a site")
     if len(shortlist):
@@ -292,8 +349,7 @@ with tab_list:
     st.download_button("Download shortlist (CSV)",
                        shortlist[cols].to_csv(index=False).encode(),
                        file_name=f"jendela_shortlist_{country}.csv", mime="text/csv")
-    st.caption("Hand this to an engineer to model properly in HOMER Pro. "
-               "It is a survey-ordering list, not an investment decision.")
+    st.caption("A survey-ordering list, not an investment decision.")
 
     st.subheader("Where the shortlist sits")
     g1, g2 = st.columns(2)
@@ -309,18 +365,15 @@ with tab_list:
     ref_top = set(data.assign(s=ref).nlargest(top_n, "s").site_id)
     overlap = len(ref_top & set(shortlist.site_id)) / max(len(ref_top), 1) * 100
     st.metric(f"Overlap with default weights (top {top_n})", f"{overlap:.0f}%",
-              help="How much the shortlist changes as you move the weight sliders. "
-                   "High overlap means the ranking is not an artefact of one weighting.")
+              help="High overlap means the ranking is not an artefact of one weighting.")
 
 # ─────────────────────────────────────────────  model
 
 with tab_model:
     st.subheader("The model behind the shortfall signal")
-    st.markdown(
-        "Gradient boosting predicts Ookla download speed from terrain and population "
-        "features only — no network-internal variables. Where a tile performs far below "
-        "what its geography predicts, the shortfall is not explained by terrain, so it "
-        "is a tractable target rather than an inevitability."
+    st.caption(
+        "Speed predicted from terrain and population only. Tiles far below prediction "
+        "are underperforming for reasons geography does not explain — tractable targets."
     )
 
     r2_block = r_squared(data.download_kbps, data.cv_predicted_speed)
@@ -331,21 +384,18 @@ with tab_model:
     m3.metric("Spatial blocks", f"{data.spatial_block.nunique()}", help="0.5° blocks")
     m4.metric("Tiles underperforming", f"{data.underperforming.mean() * 100:.0f}%")
 
-    st.caption(
-        "The gap between in-sample and out-of-block R² is the honest cost of spatial "
-        "autocorrelation. Random splits would report the higher number and mean less."
-    )
+    st.caption("The gap is the cost of honest spatial validation. Random splits flatter.")
 
     sc = data[["cv_predicted_speed", "download_kbps", "demographic_stratum"]].copy()
     sc.columns = ["predicted kbps", "measured kbps", "settlement"]
     st.scatter_chart(sc.sample(min(1500, len(sc)), random_state=0),
                      x="predicted kbps", y="measured kbps", color="settlement", height=380)
-    st.caption("Points below the diagonal are underperforming relative to prediction.")
+    st.caption("Below the diagonal = underperforming.")
 
     st.subheader("Where the shortfall is")
     under = data[data.underperforming].copy()
     under["color"] = ramp(pct_rank(under["shortfall"]))
-    v = VIEWS[country]
+    v = view_for(data)
     st.pydeck_chart(
         pdk.Deck(layers=outline_layer(country) + [
             pdk.Layer("ScatterplotLayer", data=under[["longitude", "latitude", "color"]],
@@ -364,8 +414,7 @@ with tab_model:
         ),
         unsafe_allow_html=True,
     )
-    st.caption(f"Only the {data.underperforming.sum():,} underperforming tiles are drawn. "
-               "Tiles at or above prediction are omitted — they are not a problem to solve.")
+    st.caption(f"Only the {data.underperforming.sum():,} underperforming tiles are drawn.")
 
     st.subheader("Fairness — does the model work equally well everywhere?")
     fair = data.assign(abs_err=data.residual_signed.abs()).groupby("demographic_stratum").agg(
@@ -374,18 +423,16 @@ with tab_model:
         underperforming_pct=("underperforming", lambda s: round(s.mean() * 100, 1)),
     ).reset_index()
     st.dataframe(fair.round(1), hide_index=True, use_container_width=True)
-    st.caption("Reported by settlement type rather than as a single global score. "
-               "A model that is accurate on average can still be unusable rurally.")
+    st.caption("A model accurate on average can still be unusable rurally.")
 
 # ─────────────────────────────────────────────  evidence coverage
 
 with tab_cov:
     st.subheader("Where we have no evidence at all")
-    st.markdown(
-        "Every tile in this dataset cleared a minimum-activity filter. Remote areas "
-        "generate few speed tests, so the places most likely to be off-grid are the "
-        "places we know least about. Blank space below is **absence of measurement, "
-        "never absence of coverage.**"
+    st.caption(
+        "Every tile cleared a minimum-activity filter. Remote areas generate few speed "
+        "tests, so the places most likely to be off-grid are the ones we know least "
+        "about. Blank space is **absence of measurement, never absence of coverage.**"
     )
 
     e1, e2, e3 = st.columns(3)
@@ -394,7 +441,7 @@ with tab_cov:
               help="The JENDELA Phase 2 priority region")
     e3.metric("Median tests per tile", f"{data.tests.median():.0f}")
 
-    v = VIEWS[country]
+    v = view_for(data)
     st.pydeck_chart(
         pdk.Deck(layers=outline_layer(country) + [
             pdk.Layer("ScatterplotLayer", data=data[["longitude", "latitude"]],
@@ -426,10 +473,7 @@ with tab_cov:
 
     st.bar_chart(data.groupby("demographic_stratum")["tests"].median(),
                  y_label="median Ookla tests", x_label="settlement type")
-    st.caption(
-        "Rural tiles carry the least evidence and the most inferential weight. That "
-        "asymmetry is the governance finding, and it belongs in the open."
-    )
+    st.caption("Rural tiles carry the least evidence and the most inferential weight.")
 
 # ─────────────────────────────────────────────  data integrity
 
@@ -475,10 +519,7 @@ with tab_audit:
     k2.metric("Distinct abatement values (as shipped)", raw["indicative_abatement_tco2e_yr"].nunique())
     k3.metric("Supplied residual at floor", f"{(raw['underperformance_residual'] <= 1).mean() * 100:.0f}%")
 
-    st.info(
-        "Showing this tab is deliberate. A screening tool that cannot audit its own "
-        "inputs should not be trusted to allocate public money."
-    )
+    st.info("A screening tool that cannot audit its own inputs should not allocate public money.")
 
 # ─────────────────────────────────────────────  ethics
 
@@ -509,8 +550,7 @@ with tab_ethics:
          "communities can contest a ranking through the survey process."),
     ], columns=["Dimension", "Status", "Evidence"])
     st.dataframe(ethics, hide_index=True, use_container_width=True)
-    st.caption("Three amber, four green. Claiming all green would be the tell that we had "
-               "not actually run the audit.")
+    st.caption("Three amber. Claiming all green would be the tell we had not run the audit.")
 
 # ─────────────────────────────────────────────  method
 
