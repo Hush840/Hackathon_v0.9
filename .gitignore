@@ -31,3 +31,7 @@ Thumbs.db
 .streamlit/secrets.toml
 *.env
 service_account*.json
+
+# Rejected 10 Aug re-export — kept locally as audit evidence, never shipped
+_rejected_export/
+data/NEW/
