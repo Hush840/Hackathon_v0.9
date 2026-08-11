@@ -519,6 +519,33 @@ with tab_audit:
     k2.metric("Distinct abatement values (as shipped)", raw["indicative_abatement_tco2e_yr"].nunique())
     k3.metric("Supplied residual at floor", f"{(raw['underperformance_residual'] <= 1).mean() * 100:.0f}%")
 
+    st.subheader("A re-export we tested and rejected")
+    st.markdown(
+        """
+On 10 August the pipeline was re-run to restore the missing confidence tiers, and it
+worked — thin-evidence rows survived the ETL for the first time. We ran the second
+export through the same checks before adopting it, and did not adopt it.
+
+`is_underserved_target == True` isolates exactly the rows in the export above: same
+2,815 site IDs, byte-identical measured speeds. Only the predictions changed.
+
+| Country | Out-of-block R², current | Same rows, re-export |
+|---|---|---|
+| Malaysia | **0.590** | **−8.73** |
+| Philippines | **0.545** | **−10.01** |
+| Thailand | **0.302** | **−8.43** |
+
+A negative R² is worse than predicting the mean. In-sample fell to −6.97, so the model
+was no longer fitting even its training data. The cause is that the expanded population
+is 73% thin-evidence tiles carrying a median of **3 speed tests** against 42 for
+sufficient-evidence tiles. Keeping those rows in the *output* is right. Keeping them in
+*training* is what broke it — and those are separable.
+
+The fix is a one-line filter on the training set. Until it lands, we ship the export
+that measures better rather than the one that looks more complete.
+        """
+    )
+
     st.info("A screening tool that cannot audit its own inputs should not allocate public money.")
 
 # ─────────────────────────────────────────────  ethics

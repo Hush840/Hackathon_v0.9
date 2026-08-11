@@ -111,6 +111,13 @@ sentence: that's the mountain interior, where nobody runs speed tests.)*
 > not a complete one. The hardest sites need a different instrument and that's in the
 > roadmap.
 
+**"Are you using the latest data?"** *(or if a teammate mentions the re-export)*
+> No, deliberately. We got a re-run this morning that fixed the confidence tiers, and we
+> tested it before adopting it. On the identical 2,815 rows — same site IDs, same measured
+> speeds — out-of-block R² went from 0.59 to minus 8.7, because the expanded training set
+> is 73% tiles with a median of three speed tests. We kept the export that measures
+> better. It's written up in the Data integrity tab.
+
 **"What would MCMC do with this on Monday?"**
 > Take the top twenty, cross-check against the Phase 2 site pipeline, and order surveys.
 

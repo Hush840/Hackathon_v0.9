@@ -76,6 +76,17 @@ pitch is the sensitivity analysis.
 If you have spare seconds, **Data integrity** — "we audit our own inputs" — is the
 strongest closing line available.
 
+## Data version
+
+The dashboard reads the 8 August export. A second export (10 August) restored the missing
+confidence tiers but collapsed the model — out-of-block R² fell from 0.590 to −8.73 on the
+identical Malaysian rows, because thin-evidence tiles were included in training. Tested and
+rejected; see `DATA_AUDIT_ROUND2.md` and the Data integrity tab. `check_new_data.py` re-runs
+the comparison against anything dropped into `data/NEW/`.
+
+Column names are unchanged between exports, so swapping is a file copy once the training
+filter is fixed.
+
 ## Known limits
 
 Every row is a **candidate requiring operator confirmation**. Off-grid status is inferred
