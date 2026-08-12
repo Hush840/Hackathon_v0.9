@@ -78,14 +78,17 @@ strongest closing line available.
 
 ## Data version
 
-The dashboard reads the 8 August export. A second export (10 August) restored the missing
-confidence tiers but collapsed the model — out-of-block R² fell from 0.590 to −8.73 on the
-identical Malaysian rows, because thin-evidence tiles were included in training. Tested and
-rejected; see `DATA_AUDIT_ROUND2.md` and the Data integrity tab. `check_new_data.py` re-runs
-the comparison against anything dropped into `data/NEW/`.
+**Malaysia runs on the 12 August export; the other seven countries on 8 August.** The app
+handles both formats without branching — `load()` derives a `rankable` flag from whether
+the index columns are populated, and everything downstream keys off that.
 
-Column names are unchanged between exports, so swapping is a file copy once the training
-filter is fixed.
+A 10 August export was tested and rejected: it restored the confidence tiers but collapsed
+the model, R² falling from 0.590 to −8.73 on identical rows because thin-evidence tiles had
+been included in training. The 12 August version fixed it (R² 0.598) and added per-site
+abatement, real masking and SHAP drivers.
+
+Full history in `DATA_AUDIT_ROUND2.md`. `check_new_data.py` re-runs the comparison against
+anything dropped into `data/NEW/`.
 
 ## Known limits
 

@@ -62,11 +62,19 @@ def available_countries() -> dict:
     return {k.replace("_", " ").title(): k for k in sorted(matrix_paths())}
 
 
+SCORE_COLS = ("off_grid_likelihood", "solar_viability", "logistics_difficulty")
+
+
 @st.cache_data(show_spinner=False)
 def load(country_key: str) -> pd.DataFrame:
     df = pd.read_parquet(matrix_paths()[country_key])
-    return df.drop(columns=[c for c in ("geometry", ".geo", "__index_level_0__") if c in df],
-                   errors="ignore")
+    df = df.drop(columns=[c for c in ("geometry", ".geo", "__index_level_0__") if c in df],
+                 errors="ignore")
+    # The 12 Aug export keeps thin-evidence tiles but leaves their index columns null,
+    # which is the masking working as designed. Earlier exports filtered them out
+    # upstream, so every row was rankable. Handle both without branching downstream.
+    df["rankable"] = df[list(SCORE_COLS)].notna().all(axis=1)
+    return df
 
 
 @st.cache_data(show_spinner=False)
@@ -97,6 +105,10 @@ def pct_rank(s: pd.Series) -> pd.Series:
 
 def r_squared(y, p) -> float:
     y, p = np.asarray(y, float), np.asarray(p, float)
+    ok = np.isfinite(y) & np.isfinite(p)
+    if ok.sum() < 2:
+        return float("nan")
+    y, p = y[ok], p[ok]
     return float(1 - ((y - p) ** 2).sum() / ((y - y.mean()) ** 2).sum())
 
 
@@ -106,9 +118,12 @@ def correct(df: pd.DataFrame) -> pd.DataFrame:
     Data integrity tab — nothing is silently changed."""
     d = df.copy()
 
-    for col in ("off_grid_likelihood", "solar_viability", "logistics_difficulty"):
-        d[f"{col}_n"] = pct_rank(d[col])
-    d["population_n"] = pct_rank(d["population_total"])
+    # Percentiles are computed among rankable tiles only, so masked thin-evidence
+    # rows never shift another tile's position.
+    ok = d["rankable"] if "rankable" in d else pd.Series(True, index=d.index)
+    for col in SCORE_COLS:
+        d[f"{col}_n"] = pct_rank(d[col].where(ok))
+    d["population_n"] = pct_rank(d["population_total"].where(ok))
 
     # Team decision: follow model_pipeline.py, where logistics_difficulty is a
     # divisor — harder to reach means lower priority, because installation and
@@ -119,14 +134,34 @@ def correct(df: pd.DataFrame) -> pd.DataFrame:
     # Signed residual recovered from the shipped columns. The supplied
     # underperformance_residual is floored at 1.0 for ~53% of rows.
     d["residual_signed"] = d["download_kbps"] - d["cv_predicted_speed"]
+    d["has_cv"] = d["residual_signed"].notna()
     d["underperforming"] = d["residual_signed"] < 0
-    # Only shortfall counts as priority signal; overperformance is not a problem.
-    d["shortfall"] = (-d["residual_signed"]).clip(lower=0)
-    d["residual_n"] = pct_rank(d["shortfall"])
 
-    # Abatement probability-weighted. Likelihood is capped at 1.0 rather than
-    # divided by the country maximum, so values stay comparable across files.
-    d["expected_abatement_tco2e"] = ABATEMENT_FULL_TCO2E * d["off_grid_likelihood"].clip(0, 1)
+    # The model is trained and validated on the underserved-target population. The
+    # 12 Aug export also predicts the wider sufficient-evidence set, where it scores
+    # R² −1.17 — outside its design population. We report that, but we do not let it
+    # drive the shortfall term. Both choices give an identical top 50; this one is
+    # defensible.
+    d["cv_trusted"] = d["has_cv"]
+    if "is_underserved_target" in d:
+        d["cv_trusted"] &= d["is_underserved_target"].fillna(False).astype(bool)
+
+    # Only shortfall counts as priority signal; overperformance is not a problem.
+    # Tiles with no trusted prediction score 0 rather than NaN — absence of an
+    # estimate is not evidence of a shortfall. Disclosed in Data integrity.
+    d["shortfall"] = (-d["residual_signed"].where(d["cv_trusted"])).clip(lower=0).fillna(0.0)
+    d["residual_n"] = pct_rank(d["shortfall"].where(ok))
+
+    # Abatement. The 12 Aug export varies it per site, so use it as supplied. Earlier
+    # exports shipped one constant for every row, which we replace with a likelihood-
+    # weighted estimate capped at 1.0 so countries stay comparable.
+    supplied = d.get("indicative_abatement_tco2e_yr")
+    if supplied is not None and supplied.nunique(dropna=True) > 1:
+        d["expected_abatement_tco2e"] = supplied
+        d.attrs["abatement_source"] = "pipeline (per site)"
+    else:
+        d["expected_abatement_tco2e"] = ABATEMENT_FULL_TCO2E * d["off_grid_likelihood"].clip(0, 1)
+        d.attrs["abatement_source"] = "corrected (likelihood-weighted)"
     d["people_per_tonne_v2"] = d["population_total"] / d["expected_abatement_tco2e"].replace(0, np.nan)
 
     d["region"] = np.where(d["longitude"] > 109, "East", "West")  # meaningful for Malaysia
@@ -196,7 +231,9 @@ country_label = st.sidebar.selectbox("Country", list(COUNTRIES), index=_default)
 country = COUNTRIES[country_label]
 
 raw = load(country)
-data = correct(raw)
+full = correct(raw)
+data = full[full["rankable"]].copy()      # everything rankable
+masked = full[~full["rankable"]].copy()   # thin evidence — mapped, never ranked
 
 if country in ("singapore", "brunei", "brunei_darussalam"):
     st.sidebar.warning(
@@ -205,6 +242,9 @@ if country in ("singapore", "brunei", "brunei_darussalam"):
     )
 else:
     st.sidebar.caption("Same pipeline, different file. Nothing else changes.")
+
+_vintage = "12 Aug — masked tiers, per-site abatement, SHAP" if len(masked) else "8 Aug"
+st.sidebar.caption(f"Export: {_vintage}")
 
 st.sidebar.subheader("Priority weights")
 st.sidebar.caption("Live — this is the sensitivity analysis.")
@@ -320,6 +360,12 @@ with tab_map:
             })
             contrib["contribution"] = (contrib.percentile * contrib.weight).round(3)
             st.dataframe(contrib.round(3), hide_index=True, use_container_width=True)
+            if "top_shap_driver" in shortlist.columns and pd.notna(row.top_shap_driver):
+                st.caption(
+                    f"Pipeline SHAP agrees the strongest single driver of this tile's "
+                    f"predicted speed is **{row.top_shap_driver}** "
+                    f"({row.top_shap_value:+,.0f} kbps)."
+                )
         with b:
             st.markdown("**Site detail**")
             st.write({
@@ -332,7 +378,11 @@ with tab_map:
                 "slope °": round(row.slope_degrees, 1),
                 "distance to road (m)": round(row.distance_to_road_m),
                 "distance to power (m)": round(row.distance_to_power_m),
-                "measured vs predicted (kbps)": f"{row.download_kbps:,.0f} vs {row.cv_predicted_speed:,.0f}",
+                "measured vs predicted (kbps)": (
+                    f"{row.download_kbps:,.0f} vs {row.cv_predicted_speed:,.0f}"
+                    if pd.notna(row.cv_predicted_speed)
+                    else f"{row.download_kbps:,.0f} measured · no out-of-block prediction"
+                ),
                 "Ookla tests / devices": f"{int(row.tests)} / {int(row.devices)}",
                 "status": row.inference_status,
             })
@@ -376,24 +426,45 @@ with tab_model:
         "are underperforming for reasons geography does not explain — tractable targets."
     )
 
-    r2_block = r_squared(data.download_kbps, data.cv_predicted_speed)
-    r2_in = r_squared(data.download_kbps, data.predicted_download_kbps)
+    cv = data[data["cv_trusted"]]
+    wider = data[data["has_cv"] & ~data["cv_trusted"]]
+    r2_block = r_squared(cv.download_kbps, cv.cv_predicted_speed)
+    r2_in = r_squared(cv.download_kbps, cv.predicted_download_kbps)
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Out-of-block R²", f"{r2_block:.3f}", help="Spatially blocked cross-validation")
+    m1.metric("Out-of-block R²", f"{r2_block:.3f}",
+              help="Spatially blocked cross-validation on the validated population")
     m2.metric("In-sample R²", f"{r2_in:.3f}")
-    m3.metric("Spatial blocks", f"{data.spatial_block.nunique()}", help="0.5° blocks")
-    m4.metric("Tiles underperforming", f"{data.underperforming.mean() * 100:.0f}%")
+    if "spatial_block" in data:
+        m3.metric("Spatial blocks", f"{data.spatial_block.nunique()}", help="0.5° blocks")
+    else:
+        m3.metric("Cross-validated tiles", f"{len(cv):,}")
+    m4.metric("Tiles underperforming", f"{cv.underperforming.mean() * 100:.0f}%")
 
     st.caption("The gap is the cost of honest spatial validation. Random splits flatter.")
 
-    sc = data[["cv_predicted_speed", "download_kbps", "demographic_stratum"]].copy()
+    if len(wider):
+        all_cv = data[data["has_cv"]]
+        st.warning(
+            f"**Outside its design population the model fails.** It is trained and "
+            f"validated on the {len(cv):,} underserved-target tiles above. This export "
+            f"also predicts the wider sufficient-evidence set, and across all "
+            f"{len(all_cv):,} ranked tiles out-of-block R² is "
+            f"**{r_squared(all_cv.download_kbps, all_cv.cv_predicted_speed):.2f}** — worse "
+            "than predicting the mean. That set includes urban tiles an order of magnitude "
+            "faster than anything in training.\n\n"
+            "So the shortfall term is applied only where the model is validated. The "
+            "other tiles score zero on it rather than being ranked on an extrapolation. "
+            "Both choices produce an identical top 50 — we took the defensible one."
+        )
+
+    sc = cv[["cv_predicted_speed", "download_kbps", "demographic_stratum"]].copy()
     sc.columns = ["predicted kbps", "measured kbps", "settlement"]
     st.scatter_chart(sc.sample(min(1500, len(sc)), random_state=0),
                      x="predicted kbps", y="measured kbps", color="settlement", height=380)
     st.caption("Below the diagonal = underperforming.")
 
     st.subheader("Where the shortfall is")
-    under = data[data.underperforming].copy()
+    under = cv[cv.underperforming].copy()
     under["color"] = ramp(pct_rank(under["shortfall"]))
     v = view_for(data)
     st.pydeck_chart(
@@ -414,10 +485,10 @@ with tab_model:
         ),
         unsafe_allow_html=True,
     )
-    st.caption(f"Only the {data.underperforming.sum():,} underperforming tiles are drawn.")
+    st.caption(f"Only the {len(under):,} underperforming tiles are drawn.")
 
     st.subheader("Fairness — does the model work equally well everywhere?")
-    fair = data.assign(abs_err=data.residual_signed.abs()).groupby("demographic_stratum").agg(
+    fair = cv.assign(abs_err=cv.residual_signed.abs()).groupby("demographic_stratum").agg(
         tiles=("site_id", "size"),
         median_abs_error_kbps=("abs_err", "median"),
         underperforming_pct=("underperforming", lambda s: round(s.mean() * 100, 1)),
@@ -435,22 +506,41 @@ with tab_cov:
         "about. Blank space is **absence of measurement, never absence of coverage.**"
     )
 
-    e1, e2, e3 = st.columns(3)
-    e1.metric("Tiles with evidence", f"{len(data):,}")
-    e2.metric("East Malaysia share", f"{(data.region == 'East').mean() * 100:.0f}%",
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("Ranked — sufficient evidence", f"{len(data):,}")
+    e2.metric("Masked — thin evidence", f"{len(masked):,}",
+              help="Present in the export, deliberately excluded from ranking")
+    e3.metric("East Malaysia share", f"{(data.region == 'East').mean() * 100:.0f}%",
               help="The JENDELA Phase 2 priority region")
-    e3.metric("Median tests per tile", f"{data.tests.median():.0f}")
+    e4.metric("Median tests per tile", f"{data.tests.median():.0f}",
+              delta=f"{masked.tests.median():.0f} when masked" if len(masked) else None,
+              delta_color="off")
 
-    v = view_for(data)
+    v = view_for(full)
+    cov_layers = outline_layer(country)
+    if len(masked):
+        cov_layers.append(
+            pdk.Layer("ScatterplotLayer", data=masked[["longitude", "latitude"]],
+                      get_position=["longitude", "latitude"], get_fill_color=[170, 170, 170, 70],
+                      get_radius=3000, radius_min_pixels=2, radius_max_pixels=8)
+        )
+    cov_layers.append(
+        pdk.Layer("ScatterplotLayer", data=data[["longitude", "latitude"]],
+                  get_position=["longitude", "latitude"], get_fill_color=[30, 130, 120, 150],
+                  get_radius=3000, radius_min_pixels=2.5, radius_max_pixels=10)
+    )
     st.pydeck_chart(
-        pdk.Deck(layers=outline_layer(country) + [
-            pdk.Layer("ScatterplotLayer", data=data[["longitude", "latitude"]],
-                      get_position=["longitude", "latitude"], get_fill_color=[30, 130, 120, 120],
-                      get_radius=3000, radius_min_pixels=2.5, radius_max_pixels=10)],
-            initial_view_state=pdk.ViewState(latitude=v["lat"], longitude=v["lon"], zoom=v["zoom"]),
-            map_style=BASEMAP, height=MAP_HEIGHT),
+        pdk.Deck(layers=cov_layers,
+                 initial_view_state=pdk.ViewState(latitude=v["lat"], longitude=v["lon"], zoom=v["zoom"]),
+                 map_style=BASEMAP, height=MAP_HEIGHT),
         use_container_width=True,
     )
+    if len(masked):
+        st.caption(
+            f"Grey tiles are masked: {len(masked):,} tiles carry a median of "
+            f"{masked.tests.median():.0f} speed tests against {data.tests.median():.0f} for "
+            "ranked tiles. They are shown so the thin-evidence areas read as thin, not absent."
+        )
     st.markdown(
         """
 <div style="display:flex;flex-wrap:wrap;gap:26px;align-items:center;
@@ -480,35 +570,73 @@ with tab_cov:
 with tab_audit:
     st.subheader("What we changed in the pipeline output, and why")
     st.markdown(
+        f"""
+| # | Issue in the scored matrix | Correction | State |
+|---|---|---|---|
+| 1 | `priority_score` is multiplicative and unbounded, so one factor swamps the rest — {(raw.priority_score == 0).mean() * 100:.0f}% of rows sit at exactly 0 | Rebuilt from percentile ranks with visible, adjustable weights, bounded 0–100 | still applied |
+| 2 | `indicative_abatement_tco2e_yr` shipped as one constant for every tile | Now varies per site upstream — **{raw.indicative_abatement_tco2e_yr.nunique():,} distinct values**, used as supplied | **fixed upstream** |
+| 3 | `underperformance_residual` floored at 1.0, losing direction | Signed residual recovered as `download_kbps − cv_predicted_speed`; floor now affects {(raw.underperformance_residual <= 1).mean() * 100:.0f}% of rows | mostly fixed |
+| 4 | `off_grid_likelihood` reaches {raw.off_grid_likelihood.max():.2f} despite a nominal 0–1 range | Converted to percentile ranks | still applied |
+| 5 | Thin-evidence tiles were filtered out before export, so masking could not be shown | Now shipped and masked — {len(data):,} ranked, {len(masked):,} held back | **fixed upstream** |
         """
-| # | Issue in the scored matrix | Correction |
+    )
+
+    st.subheader("The finding we would rather not have")
+    st.markdown(
+        """
+At default weights, **East Malaysia takes 0% of the top 50** — despite holding 12.3% of
+our ranked tiles and being the region JENDELA Phase 2 explicitly prioritises.
+
+The cause is the ease-of-access term. Mobilisation cost dominates at screening stage, so
+remote Sabah and Sarawak tiles rank down. Set that weight to zero and East Malaysia's
+share goes to **32%**, while total expected abatement moves from 951 to 947 tCO₂e — a
+**0.4% difference.**
+
+So the access weighting is not buying us carbon. It is buying us convenience, and it is
+doing so at the direct expense of the region the policy targets. That slider is in the
+sidebar and the effect is reproducible in about four seconds.
+
+We have left the default where the pipeline's own convention puts it, and surfaced the
+consequence here rather than tuning until the map looked equitable.
+        """
+    )
+
+    st.subheader("Which export each country runs")
+    st.markdown(
+        """
+Malaysia runs the 12 August export. The other seven countries stay on 8 August, because
+they were not regenerated — we did not re-run anyone else's pipeline to make the set look
+uniform.
+
+The app reads both formats without branching. `load()` derives a `rankable` flag from
+whether the index columns are populated; where thin-evidence rows are absent, every row
+is rankable and the masking section simply has nothing to show. Nothing about the
+scoring differs between the two.
+
+| Export | Countries | What it carries |
 |---|---|---|
-| 1 | `priority_score` spans 189 → 1.17 × 10¹⁰, not 0–100, and rank-correlates 0.90 with the residual alone — the ESG terms barely move it | Rebuilt from percentile ranks with visible, adjustable weights, bounded 0–100 |
-| 2 | `indicative_abatement_tco2e_yr` is the **same constant (22.23) for every tile**, so `people_connected_per_tonne_co2` is just population ÷ 22.23 | Abatement probability-weighted by off-grid likelihood, capped at 1.0 so values stay comparable between countries |
-| 3 | `underperformance_residual` is floored at 1.0 for 53% of rows, losing direction | Signed residual recovered as `download_kbps − cv_predicted_speed` |
-| 4 | `off_grid_likelihood` reaches 4.94 and `logistics_difficulty` 3.23 despite nominal 0–1 ranges | Converted to percentile ranks |
+| **12 Aug** | Malaysia | Two confidence tiers, per-site abatement, SHAP drivers, spatial blocks |
+| **8 Aug** | Indonesia, Thailand, Vietnam, Philippines, Myanmar, Cambodia, Singapore | One tier, constant abatement — corrections below still apply in full |
+
+Singapore was offered a 12 August file and we declined it: R² −1.49 against 0.990 on the
+current one. It is a negative control, so there was nothing to gain.
         """
     )
 
     st.subheader("Limits we cannot fix downstream")
     st.markdown(
         f"""
-- **Only one confidence tier is present.** All {len(data):,} rows read
-  *"Sufficient Evidence – Ranked Screening Approved"*. Minimum observed:
-  {int(data.tests.min())} tests, {int(data.devices.min())} devices — the evidence
-  filter ran before export, so Tier 2 and Tier 3 rows are absent. The three-tier
-  masking cannot be displayed until the matrix is re-exported unfiltered.
+- **The shortfall term is applied to {int(data.cv_trusted.sum()):,} of {len(data):,} ranked
+  tiles** — the population the model is validated on. The rest score zero on it rather
+  than being ranked on an extrapolation, so that slider does less work than it implies.
+  See the Model tab.
 - **The evidence filter biases against the target population** — see Evidence coverage.
 - **Rows are Ookla zoom-16 tiles, not tower sites.** `site_id` is a 16-character quadkey.
 - **Off-grid status is inferred** from night-lights and road/power proximity, not utility
   records. Every row is a candidate requiring operator confirmation.
-- **Ease of access biases the shortlist away from the hardest terrain.** Following the
-  pipeline's convention, remote sites rank lower because installation costs more. That
-  drops East Malaysia's share of the top 50 from 26% to 10% — so this is a first-wave
-  list, not a complete one. The hardest Sabah and Sarawak sites need a different
-  instrument, and that is in the roadmap.
-- `logistics_difficulty` is clipped at 0.1 and **50.9% of tiles sit on that floor**, so
-  ease of access cannot separate half the dataset.
+- **Ease of access makes this a first-wave list, not a complete one.** See the finding
+  above. The hardest Sabah and Sarawak sites need a different instrument — one that
+  prices helicopter mobilisation rather than penalising it — and that is in the roadmap.
 - `essential_service_weight` is 50.0 for over 75% of rows and `antenna_count` reaches
   43,394 on a single tile — both look like join artefacts and are excluded from scoring.
         """

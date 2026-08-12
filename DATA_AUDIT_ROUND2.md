@@ -1,3 +1,11 @@
+# Export audit — rounds 2 and 3
+
+> **Resolution (12 Aug).** Round 2 was rejected. A corrected export arrived the same day
+> and is now live — see the final section. Everything below is kept as the record of what
+> was found and why it mattered.
+
+---
+
 # Second export — audit findings
 
 Checked `PARQUET FOLDER NEW` against the export currently in `data/`.
@@ -93,3 +101,87 @@ Re-run `check_new_data.py` on whatever comes back. The bar is Malaysia out-of-bl
 back above roughly 0.5 on the `is_underserved_target == True` subset. If it clears that,
 swapping is a ten-minute job — the column names are unchanged, so the dashboard reads the
 new files without modification.
+
+---
+
+# Third export — accepted (12 Aug, Malaysia)
+
+Cleared the bar. Out-of-block R² **0.598** against 0.590 in the original, on the same
+2,815 cross-validated rows. Adopted for Malaysia; the other seven countries stay on the
+8 August files, and the dashboard handles both formats without branching.
+
+| | 8 Aug (was live) | Round 2 (rejected) | Round 3 (live now) |
+|---|---|---|---|
+| Malaysia R² | 0.590 | −8.73 | **0.598** |
+| Abatement | one constant | one constant | **13,577 distinct values** |
+| Confidence tiers | 1 | 2 | **2 — 14,071 ranked, 37,855 masked** |
+| Residual on floor | 13.3% | 13.3% | **2.9%** |
+| SHAP | none | none | **`top_shap_driver` + `top_shap_value`** |
+
+Two corrections retired: abatement is now per-site upstream, and thin-evidence masking
+is real rather than described. Two remain — the multiplicative priority score and the
+unbounded `off_grid_likelihood` — both still handled by percentile ranking.
+
+## What the new format required
+
+- **`spatial_block`, `lat_block`, `lon_block` were dropped**, then restored in the
+  evening file. The Model tab falls back to a cross-validated tile count when absent.
+- **Thin-evidence rows carry null index columns.** `load()` derives a `rankable` flag;
+  ranking uses rankable rows only, and percentiles are computed among them so masked
+  tiles never shift another tile's position. Coverage maps draw both.
+- **Singapore was reverted.** Its round-3 file scores R² −1.49 across the wider
+  sufficient-evidence set against 0.990 on the 8 August file. It's a negative control,
+  so there was nothing to gain and an ugly number to lose.
+
+## The finding this surfaced
+
+With 14,071 ranked tiles instead of 2,815, East Malaysia takes **0% of the top 50** at
+default weights, despite holding 12.3% of ranked tiles and being JENDELA Phase 2's
+priority region.
+
+Setting the ease-of-access weight to zero moves that to **32%**, and total expected
+abatement goes from 951 to 947 tCO₂e — a 0.4% change. The access term was buying
+convenience, not carbon, at the direct cost of the target region.
+
+Left at the pipeline's default and surfaced in the Data integrity tab rather than tuned
+away. It's now the strongest beat in the live demo.
+
+---
+
+# Fourth export — accepted with a caveat (12 Aug evening, Malaysia)
+
+Restored `spatial_block` / `lat_block` / `lon_block` (152 blocks) and extended
+`cv_predicted_speed` from 2,815 tiles to all 14,071 ranked ones. Adopted.
+
+On the validated population the model is unchanged — **R² 0.601** against 0.598, same
+2,815 rows, identical measured speeds.
+
+**But across all 14,071 ranked tiles, out-of-block R² is −1.17.** That is not a broken
+model; it is the same model measured outside its design population. The wider
+sufficient-evidence set includes urban tiles an order of magnitude faster than anything
+in training, and the model does not generalise to them.
+
+## How the dashboard handles it
+
+Both numbers are on screen. The headline metric is 0.601 on the validated population;
+a warning box directly beneath states the −1.17 and explains why.
+
+The shortfall term is applied only where the model is validated (`cv_trusted` =
+`has_cv & is_underserved_target`). The remaining tiles score zero on it rather than being
+ranked on an extrapolation.
+
+Checked before choosing: **both approaches produce an identical top 50** (50/50 overlap,
+same 951 tCO₂e, same 44 rural / 6 peri-urban split). The choice is free, so we took the
+one we can defend.
+
+## Not adopted
+
+Singapore stays on the 8 August file. Its evening export scores R² −1.49 across the
+wider sufficient-evidence set against 0.990 on the current file. It is a negative
+control, so there was nothing to gain and an ugly number to lose.
+
+## Residual floor regressed
+
+24.6%, up from 2.9% in the morning file — more rows now carry a residual, and more of
+them clamp. Immaterial here because we recover the signed residual ourselves from
+`download_kbps − cv_predicted_speed`, but worth flagging upstream.
