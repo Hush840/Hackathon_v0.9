@@ -699,6 +699,15 @@ if strategy == "Custom sensitivity":
 
 shortlist_n = st.sidebar.slider("Shortlist size", 5, 100, 20, 5)
 
+# Off by default. On, the KPI row reports how each figure moved when you last changed scope —
+# which makes a deliberate before/after comparison land, but is noise during ordinary reading.
+show_deltas = st.sidebar.checkbox(
+    "Show change vs previous scope",
+    value=False,
+    help="Adds a delta under each headline figure comparing it with the scope you had "
+         "selected before this one. Useful when demonstrating the effect of a scope change.",
+)
+
 st.sidebar.divider()
 st.sidebar.caption(
     "Default ranking comes directly from model_pipeline.py. Candidate status is inferred and requires operator / field confirmation."
@@ -785,7 +794,9 @@ with tab_overview:
     _base = _h["base"]
 
     def _delta(field, fmt="{:+,.0f}", pct=True):
-        if not _base or field not in _base:
+        # Off by default. The deltas are a demo device — useful when you deliberately change
+        # scope and want the consequence to land, noisy the rest of the time.
+        if not show_deltas or not _base or field not in _base:
             return None
         diff = _cur[field] - _base[field]
         if abs(diff) < 0.5:
@@ -802,8 +813,8 @@ with tab_overview:
         "Indicative abatement",
         f"{_cur['abate']:,.0f} tCO₂e/yr",
         _delta("abate"),
-        help="Published-average screening estimate, not site-specific engineering design. "
-             "Delta compares against your previous decision scope.",
+        help="Published-average screening estimate, not site-specific engineering design."
+             + (" Delta compares against your previous decision scope." if show_deltas else ""),
     )
     m4.metric(
         "Population associated",
@@ -812,7 +823,7 @@ with tab_overview:
         help="Sum across shortlisted analysis tiles; not deduplicated subscriber counts.",
     )
 
-    if _base:
+    if show_deltas and _base:
         st.caption(
             "Deltas compare against your previous decision scope — change the policy scope "
             "or geography and the consequence is shown, not just the new total."
