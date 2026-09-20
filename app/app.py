@@ -1174,6 +1174,33 @@ with tab_model:
             color="Settlement",
             height=360,
         )
+
+        # Plain-language reading of the chart. A validation plot that only a statistician
+        # can interpret is not evidence to a decision-maker — it is decoration.
+        _worst = min(rows, key=lambda r: r["R²"]) if rows else None
+        st.markdown("**How to read this chart**")
+        st.markdown(
+            "Each dot is one analysis tile. Left-to-right is the speed the model "
+            "**predicted**; bottom-to-top is the speed Ookla actually **measured**. A flawless "
+            "model would place every dot on a single straight diagonal.\n\n"
+            "- **The three colours sit at different heights.** That is the model working: it "
+            "correctly separates rural, peri-urban and urban.\n"
+            "- **Each colour forms a round cloud, not a thin diagonal line.** That is the model's "
+            "limit: inside any one settlement type, the prediction barely tracks reality."
+        )
+        _msg = (
+            "**What we do about it.** The model is used only to place a tile in its broad "
+            "settlement context, never to decide which of two similar tiles ranks higher. Its "
+            "output enters the score as one bounded input inside the community pillar, and the "
+            "other three pillars do not depend on it at all."
+        )
+        if _worst is not None:
+            _msg += (
+                f" Weakest stratum here is **{_worst['Stratum']}** at R² "
+                f"{_worst['R²']:.3f} — effectively no better than predicting that stratum's "
+                "average."
+            )
+        st.info(_msg)
     else:
         st.info("No validated CV population is available in this export.")
 
@@ -1246,6 +1273,15 @@ with tab_method:
 
     st.divider()
     st.subheader("How the ranking is built")
+
+    # Weights follow the sidebar. The pipeline default is always shown alongside whatever
+    # scenario is active, so a reader can see exactly what a stress test changed and by
+    # how much — the production weights never disappear from view.
+    _active = scenario_weights
+    _is_default = strategy == "Balanced — pipeline default"
+    _order = ["diesel", "solar", "community", "feasibility"]
+    _tot = sum(_active.values()) or 1.0
+
     formula = pd.DataFrame(
         {
             "Pillar": [
@@ -1254,7 +1290,15 @@ with tab_method:
                 "Community impact",
                 "Implementation feasibility",
             ],
-            "Pipeline weight": ["40%", "25%", "30%", "5%"],
+            "Pipeline weight": [f"{PIPELINE_WEIGHTS[k]:.0%}" for k in _order],
+            f"{'Active' if _is_default else strategy}": [
+                f"{_active[k] / _tot:.0%}" for k in _order
+            ],
+            "Change": [
+                "—" if abs(_active[k] / _tot - PIPELINE_WEIGHTS[k]) < 0.005
+                else f"{(_active[k] / _tot - PIPELINE_WEIGHTS[k]) * 100:+.0f} pts"
+                for k in _order
+            ],
             "Main evidence": [
                 "50/50 mapped power distance + VIIRS darkness; VIIRS-only fallback if power mapping is missing",
                 "Solar resource + canopy + slope + rainfall",
@@ -1264,6 +1308,20 @@ with tab_method:
         }
     )
     st.dataframe(formula, hide_index=True, use_container_width=True)
+
+    if _is_default:
+        st.caption(
+            "These are the production weights from `model_pipeline.py`. Change **Ranking "
+            "strategy** in the sidebar to see how a different policy emphasis would move them "
+            "— the pipeline column stays visible for comparison."
+        )
+    else:
+        st.warning(
+            f"**Stress test active — {strategy}.** The pipeline weights are unchanged and still "
+            f"shown on the left. {strategy_overlap:.0f}% of the current top "
+            f"{min(shortlist_n, len(shortlist))} also appear in the pipeline-default shortlist "
+            "for this same scope, which is the sensitivity of the ranking to this re-weighting."
+        )
 
     st.markdown(
         """
