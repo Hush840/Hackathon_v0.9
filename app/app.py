@@ -1439,52 +1439,6 @@ with tab_method:
         )
 
     st.divider()
-    st.subheader("From every observed tile to the shortlist")
-    st.caption(
-        "Live for the scope currently selected in the sidebar. Nothing is dropped silently — "
-        "each stage below is inspectable elsewhere in the dashboard."
-    )
-
-    _n_all = len(full)
-    _n_appr = int(full["rankable"].sum())
-    _n_scope = len(scoped)
-    _n_short = len(shortlist)
-    _masked_n = int(
-        full["confidence_tier"].astype(str).str.startswith("Thin").sum()
-    ) if "confidence_tier" in full.columns else _n_all - _n_appr
-    _above_n = _n_all - _n_appr - _masked_n
-
-    funnel = pd.DataFrame(
-        {
-            "Stage": [
-                "Ookla analysis tiles observed",
-                "Passed the evidence gate",
-                f"Policy + geography scope · {scope_text}",
-                f"Ranked by {'pipeline priority' if strategy.startswith('Balanced') else strategy}, top N",
-            ],
-            "Tiles": [f"{_n_all:,}", f"{_n_appr:,}", f"{_n_scope:,}", f"{_n_short:,}"],
-            "Share of all": [
-                "100.00%",
-                f"{100 * _n_appr / max(_n_all, 1):.2f}%",
-                f"{100 * _n_scope / max(_n_all, 1):.2f}%",
-                f"{100 * _n_short / max(_n_all, 1):.2f}%",
-            ],
-            "Removed here, and why": [
-                "—",
-                f"{_masked_n:,} masked for thin evidence · {_above_n:,} already above baseline",
-                f"{_n_appr - _n_scope:,} outside the selected settlement type or region",
-                f"{_n_scope - _n_short:,} eligible but below the shortlist cut",
-            ],
-        }
-    )
-    st.dataframe(funnel, hide_index=True, use_container_width=True)
-    st.caption(
-        "The two evidence-gate exclusions are opposite findings and are never merged: masked "
-        "means **go and measure this**, above baseline means **this is already adequate**. "
-        "The shortlist size is a slider, not a fixed number."
-    )
-
-    st.divider()
     st.subheader("How the ranking is built")
 
     # Weights follow the sidebar. The pipeline default is always shown alongside whatever
@@ -1528,22 +1482,6 @@ with tab_method:
             "strategy** in the sidebar to see how a different policy emphasis would move them "
             "— the pipeline column stays visible for comparison."
         )
-    else:
-        st.warning(
-            f"**Stress test active — {strategy}.** The pipeline weights are unchanged and still "
-            f"shown on the left. {strategy_overlap:.0f}% of the current top "
-            f"{min(shortlist_n, len(shortlist))} also appear in the pipeline-default shortlist "
-            "for this same scope, which is the sensitivity of the ranking to this re-weighting."
-        )
-
-    st.markdown(
-        """
-        **Speed model:** Random Forest regression with 0.5° spatially blocked cross-validation.
-        **SHAP:** explains the Random Forest speed prediction only; it does not explain the final four-pillar priority score.
-        **Model disagreement:** standard deviation across Random Forest trees; useful as a stability signal, not a calibrated confidence interval.
-        **ML circuit breaker:** if spatial validation fails, the connectivity residual is set to zero contribution while the deterministic ESG pillars remain active.
-        """
-    )
 
     st.divider()
     st.subheader("Geospatial engineering")
@@ -1582,34 +1520,3 @@ with tab_method:
         """
     )
 
-    st.divider()
-    st.subheader("Sustainable Development Goal alignment")
-
-    sdg = pd.DataFrame(
-        {
-            "Goal": [
-                "SDG 9 · Industry, Innovation and Infrastructure",
-                "SDG 7 · Affordable and Clean Energy",
-                "SDG 13 · Climate Action",
-                "SDG 10 · Reduced Inequalities",
-            ],
-            "Target": ["9.1 and 9.c", "7.2", "13.2", "10.2"],
-            "How this tool contributes": [
-                "A planning instrument for resilient telecom infrastructure and universal ICT access — prioritising which last-mile sites receive attention first",
-                "Raising the renewable share at off-grid infrastructure by identifying where diesel displacement is viable",
-                "Placing a carbon figure inside an infrastructure decision that would otherwise be made on cost alone",
-                "Surfacing that the region most in need was the region least visible in the evidence, and changing the decision scope rather than accepting the ranking",
-            ],
-        }
-    )
-    st.dataframe(sdg, hide_index=True, use_container_width=True)
-    st.caption(
-        "Secondary alignment: **SDG 3** through reduced diesel exhaust and connectivity that "
-        "enables telemedicine · **SDG 11** for rural settlements · **SDG 17**, since the entire "
-        "stack is open data and open source with no licence barrier. "
-        "The primary fit is SDG 9 — everything else follows from prioritising infrastructure well."
-    )
-
-    st.info(
-        "HOMER-style tools design one microgrid in detail. This dashboard answers the earlier question: which rural candidate locations are worth sending an engineer to first?"
-    )
