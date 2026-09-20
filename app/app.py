@@ -1256,6 +1256,36 @@ with tab_model:
         "allowed into Community Impact only when spatial validation passes the guardrail."
     )
 
+    # Mentor question: "what percentage is train and what percentage is validation?"
+    # There is no fixed split, and the reason why is the substantive answer.
+    if len(cv) and "spatial_block" in cv.columns:
+        _folds = int(cv["spatial_block"].nunique())
+        _per_fold = len(cv) / _folds if _folds else 0
+        _test_pct = 100.0 * _per_fold / max(len(cv), 1)
+        with st.expander("How the train / validation split works"):
+            st.markdown(
+                f"""
+                There is no fixed 80/20 split. Validation is **{_folds}-fold
+                leave-one-block-out** over 0.5° spatial blocks — roughly 55 km squares.
+
+                | | |
+                |---|---|
+                | Folds | {_folds} |
+                | Train, per fold | **{100 - _test_pct:.1f}%** ({len(cv) - _per_fold:,.0f} tiles) |
+                | Validate, per fold | **{_test_pct:.1f}%** ({_per_fold:,.0f} tiles, one whole block) |
+                | Coverage | every tile predicted exactly once, out-of-block |
+
+                **Why not a random 80/20?** Because geographic data leaks. Two towers 2 km
+                apart share terrain, population and often the same equipment — put one in
+                train and one in test and the model scores well by memorising
+                neighbourhoods rather than learning anything transferable. Holding out a
+                whole 55 km block forces prediction on a region the model has never seen.
+
+                The cost of that honesty is visible above: **out-of-block R² is lower than
+                in-sample**, and the lower number is the one reported.
+                """
+            )
+
     if not has_explicit_model_status and len(cv):
         st.info(
             "This is a legacy export without an explicit model-validation status. "
@@ -1409,6 +1439,52 @@ with tab_method:
         )
 
     st.divider()
+    st.subheader("From every observed tile to the shortlist")
+    st.caption(
+        "Live for the scope currently selected in the sidebar. Nothing is dropped silently — "
+        "each stage below is inspectable elsewhere in the dashboard."
+    )
+
+    _n_all = len(full)
+    _n_appr = int(full["rankable"].sum())
+    _n_scope = len(scoped)
+    _n_short = len(shortlist)
+    _masked_n = int(
+        full["confidence_tier"].astype(str).str.startswith("Thin").sum()
+    ) if "confidence_tier" in full.columns else _n_all - _n_appr
+    _above_n = _n_all - _n_appr - _masked_n
+
+    funnel = pd.DataFrame(
+        {
+            "Stage": [
+                "Ookla analysis tiles observed",
+                "Passed the evidence gate",
+                f"Policy + geography scope · {scope_text}",
+                f"Ranked by {'pipeline priority' if strategy.startswith('Balanced') else strategy}, top N",
+            ],
+            "Tiles": [f"{_n_all:,}", f"{_n_appr:,}", f"{_n_scope:,}", f"{_n_short:,}"],
+            "Share of all": [
+                "100.00%",
+                f"{100 * _n_appr / max(_n_all, 1):.2f}%",
+                f"{100 * _n_scope / max(_n_all, 1):.2f}%",
+                f"{100 * _n_short / max(_n_all, 1):.2f}%",
+            ],
+            "Removed here, and why": [
+                "—",
+                f"{_masked_n:,} masked for thin evidence · {_above_n:,} already above baseline",
+                f"{_n_appr - _n_scope:,} outside the selected settlement type or region",
+                f"{_n_scope - _n_short:,} eligible but below the shortlist cut",
+            ],
+        }
+    )
+    st.dataframe(funnel, hide_index=True, use_container_width=True)
+    st.caption(
+        "The two evidence-gate exclusions are opposite findings and are never merged: masked "
+        "means **go and measure this**, above baseline means **this is already adequate**. "
+        "The shortlist size is a slider, not a fixed number."
+    )
+
+    st.divider()
     st.subheader("How the ranking is built")
 
     # Weights follow the sidebar. The pipeline default is always shown alongside whatever
@@ -1504,6 +1580,34 @@ with tab_method:
         - Tree canopy uses the available tree-cover baseline and should not be presented as a current site survey.
         - The pooled spatial-CV R² is materially stronger than the within-stratum R² values; the model signal is therefore deliberately bounded inside the community pillar.
         """
+    )
+
+    st.divider()
+    st.subheader("Sustainable Development Goal alignment")
+
+    sdg = pd.DataFrame(
+        {
+            "Goal": [
+                "SDG 9 · Industry, Innovation and Infrastructure",
+                "SDG 7 · Affordable and Clean Energy",
+                "SDG 13 · Climate Action",
+                "SDG 10 · Reduced Inequalities",
+            ],
+            "Target": ["9.1 and 9.c", "7.2", "13.2", "10.2"],
+            "How this tool contributes": [
+                "A planning instrument for resilient telecom infrastructure and universal ICT access — prioritising which last-mile sites receive attention first",
+                "Raising the renewable share at off-grid infrastructure by identifying where diesel displacement is viable",
+                "Placing a carbon figure inside an infrastructure decision that would otherwise be made on cost alone",
+                "Surfacing that the region most in need was the region least visible in the evidence, and changing the decision scope rather than accepting the ranking",
+            ],
+        }
+    )
+    st.dataframe(sdg, hide_index=True, use_container_width=True)
+    st.caption(
+        "Secondary alignment: **SDG 3** through reduced diesel exhaust and connectivity that "
+        "enables telemedicine · **SDG 11** for rural settlements · **SDG 17**, since the entire "
+        "stack is open data and open source with no licence barrier. "
+        "The primary fit is SDG 9 — everything else follows from prioritising infrastructure well."
     )
 
     st.info(
