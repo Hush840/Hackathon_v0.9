@@ -28,9 +28,9 @@ Five moves. The centre of it is stronger than what you had in August.
 > Every dot is an Ookla analysis tile matched to a candidate site — about six hundred
 > metres across, not a confirmed tower. Malaysia has fifty-one thousand of them.
 >
-> Only two thousand five hundred and eighty cleared the evidence bar for ranking. The
-> rest are either too thinly measured to trust, or already performing above baseline and
-> excluded. Green is higher priority, ringed is the shortlist.
+> Only two thousand five hundred and eighty cleared the evidence bar for ranking. Grey is
+> everything too thinly measured to trust. Green is higher priority, ringed is the
+> shortlist. Tiles already performing above baseline are out of scope and not drawn.
 
 *Pause. Two seconds.*
 
@@ -180,9 +180,10 @@ the per-stratum honesty in Move 4.
 
 Three things now do work the script used to do with words.
 
-**The evidence layer is on the landing map.** Grey = masked for thin evidence, pale olive =
-above baseline and excluded, green = eligible to rank, rings = shortlist. Borneo now reads
-as visibly grey the moment the page loads. Open on Overview and let it sit for two seconds
+**The evidence layer is on the landing map.** Grey = masked for thin evidence, green =
+eligible to rank, rings = shortlist. Above-baseline tiles are no longer drawn — they carry
+no decision, and leaving them off reduces the map to the only two states that require an
+action. Borneo now reads as visibly grey the moment the page loads. Open on Overview and let it sit for two seconds
 before speaking — the map makes your argument before you do.
 
 **The KPIs show deltas.** Change scope and the abatement figure carries a green +66 (+21%).

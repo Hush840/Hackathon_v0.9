@@ -308,7 +308,7 @@ def color_ramp(values) -> list[list[int]]:
     ]
 
 
-def priority_legend_html(n_ranked=None, n_excluded=None, n_masked=None) -> str:
+def priority_legend_html(n_ranked=None, n_masked=None) -> str:
     """Legend for the decision map. Reads as evidence first, ranking second."""
     def cnt(n):
         return f" · {n:,}" if n else ""
@@ -320,11 +320,6 @@ def priority_legend_html(n_ranked=None, n_excluded=None, n_masked=None) -> str:
         <div style="width:190px;height:10px;border-radius:999px;
                     background:linear-gradient(90deg,rgb(240,175,65),rgb(55,220,160));"></div>
         <span style="opacity:.72;">Higher{cnt(n_ranked)} ranked</span>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px;">
-        <span style="width:11px;height:11px;display:inline-block;border-radius:50%;
-                     background:rgb(163,196,124);opacity:.65;"></span>
-        <span style="opacity:.72;">Above baseline — excluded{cnt(n_excluded)}</span>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="width:9px;height:9px;display:inline-block;border-radius:50%;
@@ -743,12 +738,9 @@ with tab_overview:
 
     backdrop = geo_subset(full, geography, country_key)
     if "confidence_tier" in backdrop.columns:
-        _tier = backdrop["confidence_tier"].astype(str)
-        masked = backdrop[_tier.str.startswith("Thin")]
-        excluded = backdrop[_tier.str.contains("Above Baseline", na=False)]
+        masked = backdrop[backdrop["confidence_tier"].astype(str).str.startswith("Thin")]
     else:
         masked = backdrop[~backdrop["rankable"]]
-        excluded = backdrop.iloc[0:0]
 
     v = view_for(backdrop if len(backdrop) else map_data)
     layers = outline_layers(country_key)
@@ -763,16 +755,10 @@ with tab_overview:
                 get_radius=2000, radius_min_pixels=1.4, radius_max_pixels=6,
             )
         )
-    if len(excluded):
-        layers.append(
-            pdk.Layer(
-                "ScatterplotLayer",
-                data=excluded[["longitude", "latitude"]],
-                get_position=["longitude", "latitude"],
-                get_fill_color=[163, 196, 124, 110],
-                get_radius=2200, radius_min_pixels=1.8, radius_max_pixels=8,
-            )
-        )
+    # Above-baseline tiles are deliberately not drawn. They are measured and already
+    # performing, so they carry no decision. Leaving them off reduces the map to the only
+    # two states that require an action: grey = go and measure, green = rank and survey.
+    # The tier remains in the governance table on the Model & evidence tab.
 
     layers.append(
         pdk.Layer(
@@ -828,7 +814,7 @@ with tab_overview:
     )
 
     st.markdown(
-        priority_legend_html(len(scoped), len(excluded), len(masked)),
+        priority_legend_html(len(scoped), len(masked)),
         unsafe_allow_html=True,
     )
     if len(masked):
