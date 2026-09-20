@@ -156,6 +156,13 @@ def load_matrix(country_key: str, file_mtime_ns: int) -> pd.DataFrame:
         errors="ignore",
     )
 
+    # Matrices are stored with dictionary-encoded strings to keep the repo small. Read
+    # them back as plain objects: a categorical dtype makes groupby carry unobserved
+    # categories into the fairness table and the evidence chart, which produces empty
+    # rows and NaN metrics on the smaller countries.
+    for c in df.select_dtypes("category").columns:
+        df[c] = df[c].astype(object)
+
     # Explicit governance decision first; fallback only for legacy exports.
     if "confidence_tier" in df.columns:
         df["rankable"] = df["confidence_tier"].eq(APPROVED_TIER)
@@ -301,24 +308,203 @@ def color_ramp(values) -> list[list[int]]:
     ]
 
 
-def priority_legend_html() -> str:
-    return """
-    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:18px;
-                padding:6px 2px 12px 2px;font-size:13px;">
+def priority_legend_html(n_ranked=None, n_excluded=None, n_masked=None) -> str:
+    """Legend for the decision map. Reads as evidence first, ranking second."""
+    def cnt(n):
+        return f" · {n:,}" if n else ""
+    return f"""
+    <div style="display:flex;flex-wrap:wrap;align-items:center;gap:20px;
+                padding:8px 2px 4px 2px;font-size:12.5px;">
       <div style="display:flex;align-items:center;gap:8px;">
         <span style="opacity:.72;">Lower priority</span>
-        <div style="width:220px;height:11px;border-radius:999px;
+        <div style="width:190px;height:10px;border-radius:999px;
                     background:linear-gradient(90deg,rgb(240,175,65),rgb(55,220,160));"></div>
-        <span style="opacity:.72;">Higher priority</span>
+        <span style="opacity:.72;">Higher{cnt(n_ranked)} ranked</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="width:11px;height:11px;display:inline-block;border-radius:50%;
+                     background:rgb(163,196,124);opacity:.65;"></span>
+        <span style="opacity:.72;">Above baseline — excluded{cnt(n_excluded)}</span>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span style="width:9px;height:9px;display:inline-block;border-radius:50%;
+                     background:rgb(168,172,170);opacity:.6;"></span>
+        <span style="opacity:.72;">Thin evidence — masked{cnt(n_masked)}</span>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
         <span style="width:13px;height:13px;display:inline-block;
                      border:2px solid #222;border-radius:50%;"></span>
-        <span style="opacity:.72;">Current shortlist</span>
+        <span style="opacity:.72;">Shortlist</span>
       </div>
-      <div style="opacity:.62;">Colour is relative to the currently selected decision scope</div>
+    </div>
+    <div style="opacity:.6;font-size:11.5px;padding:0 2px 10px 2px;">
+      One dot is one Ookla analysis tile, roughly 600 m across, matched to the nearest
+      candidate-site proxy — not a confirmed tower. Colour is relative to the current
+      decision scope. Blank space inside the outline is <strong>absence of measurement,
+      never absence of coverage</strong>.
     </div>
     """
+
+
+def site_brief_html(row, country_label: str, scope_text: str) -> str:
+    """One-page field brief for a single candidate. Opens and prints from a browser.
+
+    This is the handoff artefact: what a survey engineer carries to the site, including
+    space to record what they find. It is deliberately not a recommendation.
+    """
+    def n(v, dec=0, suf=""):
+        try:
+            v = float(v)
+            return "—" if not np.isfinite(v) else f"{v:,.{dec}f}{suf}"
+        except (TypeError, ValueError):
+            return "—"
+
+    pillars = [("Diesel / off-grid dependence", row.get("off_grid_score_n"), "40%"),
+               ("Solar suitability", row.get("solar_score_n"), "25%"),
+               ("Community impact", row.get("community_impact_n"), "30%"),
+               ("Implementation feasibility", row.get("access_ease_n"), "5%")]
+    bars = ""
+    for lab, val, w in pillars:
+        pc = float(np.clip(float(val) if pd.notna(val) else 0, 0, 1)) * 100
+        bars += (
+            f'<tr><td class="lab">{lab}<span class="w">weight {w}</span></td>'
+            f'<td class="barcell"><div class="bar"><i style="width:{pc:.0f}%"></i></div></td>'
+            f'<td class="num">{pc:.0f}<span class="o">/100</span></td></tr>'
+        )
+
+    flags = [t for c, t in (
+        ("power_distance_missing", "Power-infrastructure distance imputed — verify on site"),
+        ("road_distance_missing", "Road distance imputed — verify local accessibility"),
+        ("amenity_distance_missing", "Amenity distance imputed — verify service context"),
+    ) if bool(row.get(c, False))]
+    flag_html = ("<ul class='flags'>" + "".join(f"<li>{f}</li>" for f in flags) + "</ul>"
+                 if flags else "<p class='ok'>No infrastructure-missing flags raised.</p>")
+
+    ctx = [("Distance to mapped power", n(row.get("power_km"), 2, " km")),
+           ("Distance to mapped road", n(row.get("road_km"), 2, " km")),
+           ("Distance to school / clinic", n(row.get("amenity_km"), 2, " km")),
+           ("Measured download", n(row.get("download_kbps"), 0, " kbps")),
+           ("Expected download", n(row.get("cv_predicted_speed"), 0, " kbps")),
+           ("Ookla evidence", f"{n(row.get('tests'))} tests / {n(row.get('devices'))} devices"),
+           ("Settlement type", str(row.get("demographic_stratum", "—"))),
+           ("Region", str(row.get("macro_region", "—")))]
+    ctx_html = "".join(f"<tr><td>{k}</td><td class='v'>{v}</td></tr>" for k, v in ctx)
+
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<title>Site brief — {row.get('site_id')}</title><style>
+*{{box-sizing:border-box}}
+body{{font:13px/1.5 -apple-system,Segoe UI,Inter,sans-serif;color:#13251d;margin:0;
+     padding:34px 40px;background:#fff;max-width:840px}}
+h1{{font-size:23px;margin:0 0 2px}} h2{{font-size:12px;letter-spacing:.09em;
+     text-transform:uppercase;color:#5d6b64;margin:24px 0 8px;font-weight:700}}
+.hdr{{border-bottom:2px solid #013d27;padding-bottom:12px;margin-bottom:6px}}
+.sub{{color:#5d6b64;font-size:12.5px}}
+.rank{{display:inline-block;background:#013d27;color:#e9ffe5;border-radius:6px;
+     padding:3px 10px;font-weight:700;font-size:12px;margin-bottom:8px}}
+.banner{{background:#fff6e5;border-left:4px solid #d08a1b;padding:10px 14px;
+     margin:14px 0 4px;font-weight:600;font-size:12.5px}}
+table{{width:100%;border-collapse:collapse;margin-top:4px}}
+td{{padding:5px 0;border-bottom:1px solid #eceeed;vertical-align:middle}}
+td.v,.num{{text-align:right;font-variant-numeric:tabular-nums}}
+.lab{{width:44%}} .w{{display:block;color:#8a9691;font-size:10.5px;font-weight:400}}
+.barcell{{width:40%;padding-right:14px}}
+.bar{{background:#e9efec;border-radius:999px;height:9px;overflow:hidden}}
+.bar i{{display:block;height:100%;background:#03c704}}
+.num{{width:16%;font-weight:700}} .o{{color:#8a9691;font-weight:400;font-size:11px}}
+.grid{{display:flex;gap:26px}} .grid>div{{flex:1}}
+.kpi{{background:#f2f8f4;border-radius:8px;padding:11px 14px;margin-bottom:8px}}
+.kpi b{{display:block;font-size:19px}} .kpi span{{color:#5d6b64;font-size:11px}}
+.flags li{{color:#9a5b0c;margin-bottom:3px}} .ok{{color:#2c7a4b}}
+.sign{{margin-top:22px;border:1px solid #d6dedb;border-radius:8px;padding:14px 16px}}
+.sign .row{{display:flex;gap:26px;margin-top:14px}}
+.sign .row div{{flex:1;border-bottom:1px solid #b9c5bf;padding-bottom:22px;font-size:11px;color:#8a9691}}
+footer{{margin-top:26px;color:#8a9691;font-size:10.5px;border-top:1px solid #eceeed;padding-top:10px}}
+@media print{{body{{padding:16px 20px}} .banner{{-webkit-print-color-adjust:exact}}}}
+</style></head><body>
+<div class="hdr">
+  <div class="rank">{scope_text} · Priority #{int(row.get('scope_rank', 0))}</div>
+  <h1>Candidate site brief</h1>
+  <div class="sub">Tile {row.get('site_id')} · {country_label} ·
+    {n(row.get('latitude'), 4)}, {n(row.get('longitude'), 4)}</div>
+</div>
+<div class="banner">CANDIDATE — VALIDATION REQUIRED. Off-grid status is inferred from open
+data, not observed. This brief authorises a site survey, not an investment decision.</div>
+
+<h2>Why this site ranks here</h2>
+<table>{bars}</table>
+
+<h2>Indicative screening impact</h2>
+<div class="grid">
+  <div class="kpi"><b>{n(row.get('expected_abatement_tco2e'), 1)} tCO₂e/yr</b>
+    <span>avoided if converted to solar-hybrid</span></div>
+  <div class="kpi"><b>${n(row.get('indicative_opex_saving_usd'))}</b>
+    <span>indicative annual OPEX saving</span></div>
+  <div class="kpi"><b>{n(row.get('population_total'))}</b>
+    <span>population associated with this tile</span></div>
+</div>
+<p class="sub">Published-average estimates scaled by inferred off-grid likelihood. Not an
+engineering design and not a business case.</p>
+
+<h2>Site context</h2>
+<table>{ctx_html}</table>
+
+<h2>Data provenance warnings</h2>
+{flag_html}
+
+<div class="sign">
+  <strong>Field survey record</strong>
+  <div class="sub">To be completed on site.</div>
+  <div class="row"><div>Grid connection confirmed? Y / N</div><div>Generator present? Y / N</div></div>
+  <div class="row"><div>Access route / constraints</div><div>Shading or siting constraints</div></div>
+  <div class="row"><div>Surveyor name</div><div>Date</div></div>
+</div>
+<footer>Powering the Last Mile · AGAIF 2026 · Generated from the JENDELA Phase 2 screening
+matrix. Every figure is a screening estimate from open data and requires operator
+confirmation.</footer>
+</body></html>"""
+
+
+def geo_subset(d: pd.DataFrame, geography: str, country_key: str) -> pd.DataFrame:
+    """Geographic scope only — no policy filter. Used for the evidence backdrop."""
+    if country_key != "malaysia" or "macro_region" not in d.columns:
+        return d
+    if geography == "East Malaysia (Sabah + Sarawak)":
+        return d[d["macro_region"].eq("East Malaysia")]
+    if geography == "Peninsular Malaysia":
+        return d[d["macro_region"].eq("Peninsular Malaysia")]
+    return d
+
+
+REGION_LABELS = {
+    "malaysia": [
+        {"name": "PENINSULAR MALAYSIA", "lon": 102.15, "lat": 6.95},
+        {"name": "SABAH", "lon": 117.10, "lat": 6.55},
+        {"name": "SARAWAK", "lon": 112.40, "lat": 1.30},
+    ]
+}
+
+
+def label_layer(country_key: str, geography: str):
+    labels = REGION_LABELS.get(country_key, [])
+    if not labels:
+        return []
+    if geography == "East Malaysia (Sabah + Sarawak)":
+        labels = [l for l in labels if l["name"] != "PENINSULAR MALAYSIA"]
+    elif geography == "Peninsular Malaysia":
+        labels = [l for l in labels if l["name"] == "PENINSULAR MALAYSIA"]
+    return [
+        pdk.Layer(
+            "TextLayer",
+            data=labels,
+            get_position=["lon", "lat"],
+            get_text="name",
+            get_size=11,
+            get_color=[70, 88, 78, 190],
+            get_alignment_baseline="'center'",
+            character_set="auto",
+            font_family="'Inter', sans-serif",
+        )
+    ]
 
 
 def outline_layers(country_key: str):
@@ -491,32 +677,103 @@ tab_overview, tab_priority, tab_model, tab_method = st.tabs(
 # -----------------------------------------------------------------------------
 
 with tab_overview:
+    # Deltas against the previously selected decision scope, so changing scope shows the
+    # consequence rather than just a new number. This is the point of the tool.
+    _scope_key = f"{country_key}|{policy_scope}|{geography}|{strategy}|{shortlist_n}"
+    _cur = {
+        "scope": float(len(scoped)),
+        "short": float(len(shortlist)),
+        "abate": float(shortlist["expected_abatement_tco2e"].sum()),
+        "pop": float(shortlist["population_total"].sum()),
+    }
+    _h = st.session_state.setdefault("_kpi_hist", {"key": _scope_key, "vals": _cur, "base": None})
+    if _h["key"] != _scope_key:
+        _h["base"] = _h["vals"]
+        _h["key"] = _scope_key
+    _h["vals"] = _cur
+    _base = _h["base"]
+
+    def _delta(field, fmt="{:+,.0f}", pct=True):
+        if not _base or field not in _base:
+            return None
+        diff = _cur[field] - _base[field]
+        if abs(diff) < 0.5:
+            return None
+        out = fmt.format(diff)
+        if pct and _base[field]:
+            out += f"  ({diff / _base[field] * 100:+.0f}%)"
+        return out
+
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Candidates in scope", f"{len(scoped):,}")
-    m2.metric("Shortlisted", f"{len(shortlist):,}")
+    m1.metric("Candidates in scope", f"{len(scoped):,}", _delta("scope"))
+    m2.metric("Shortlisted", f"{len(shortlist):,}", _delta("short", pct=False))
     m3.metric(
         "Indicative abatement",
-        f"{shortlist['expected_abatement_tco2e'].sum():,.0f} tCO₂e/yr",
-        help="Published-average screening estimate, not site-specific engineering design.",
+        f"{_cur['abate']:,.0f} tCO₂e/yr",
+        _delta("abate"),
+        help="Published-average screening estimate, not site-specific engineering design. "
+             "Delta compares against your previous decision scope.",
     )
     m4.metric(
         "Population associated",
-        f"{shortlist['population_total'].sum():,.0f}",
+        f"{_cur['pop']:,.0f}",
+        _delta("pop"),
         help="Sum across shortlisted analysis tiles; not deduplicated subscriber counts.",
     )
 
+    if _base:
+        st.caption(
+            "Deltas compare against your previous decision scope — change the policy scope "
+            "or geography and the consequence is shown, not just the new total."
+        )
     st.caption(
         "Screening only: a ranked candidate is a field-survey trigger, not proof that a tower is off-grid and not an investment decision."
     )
 
     # Full-width map: the geospatial decision view is the hero of the dashboard.
+    #
+    # Three evidence states are drawn underneath the ranking, because where we cannot
+    # assess is as much a finding as where we rank. The background reflects the
+    # geographic scope only — evidence coverage is a property of the place, not of the
+    # policy filter sitting on top of it.
     map_data = scoped.copy()
     map_data["shade"] = map_data["display_score"].rank(pct=True)
     map_data["color"] = color_ramp(map_data["shade"])
     map_data["radius"] = 1200 + 5200 * (map_data["display_score"] / 100) ** 2
 
-    v = view_for(map_data)
+    backdrop = geo_subset(full, geography, country_key)
+    if "confidence_tier" in backdrop.columns:
+        _tier = backdrop["confidence_tier"].astype(str)
+        masked = backdrop[_tier.str.startswith("Thin")]
+        excluded = backdrop[_tier.str.contains("Above Baseline", na=False)]
+    else:
+        masked = backdrop[~backdrop["rankable"]]
+        excluded = backdrop.iloc[0:0]
+
+    v = view_for(backdrop if len(backdrop) else map_data)
     layers = outline_layers(country_key)
+
+    if len(masked):
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=masked[["longitude", "latitude"]],
+                get_position=["longitude", "latitude"],
+                get_fill_color=[168, 172, 170, 70],
+                get_radius=2000, radius_min_pixels=1.4, radius_max_pixels=6,
+            )
+        )
+    if len(excluded):
+        layers.append(
+            pdk.Layer(
+                "ScatterplotLayer",
+                data=excluded[["longitude", "latitude"]],
+                get_position=["longitude", "latitude"],
+                get_fill_color=[163, 196, 124, 110],
+                get_radius=2200, radius_min_pixels=1.8, radius_max_pixels=8,
+            )
+        )
+
     layers.append(
         pdk.Layer(
             "ScatterplotLayer",
@@ -553,6 +810,8 @@ with tab_overview:
             )
         )
 
+    layers += label_layer(country_key, geography)
+
     st.pydeck_chart(
         pdk.Deck(
             layers=layers,
@@ -568,11 +827,16 @@ with tab_overview:
         use_container_width=True,
     )
 
-    st.markdown(priority_legend_html(), unsafe_allow_html=True)
-    st.caption(
-        "Each dot is an Ookla analysis tile linked to the nearest OpenCellID-derived "
-        "candidate-site proxy. Black rings mark the current shortlist."
+    st.markdown(
+        priority_legend_html(len(scoped), len(excluded), len(masked)),
+        unsafe_allow_html=True,
     )
+    if len(masked):
+        share = 100.0 * len(masked) / max(len(backdrop), 1)
+        st.caption(
+            f"**{share:.0f}% of tiles in view are masked for thin evidence.** They are drawn "
+            "so the places we cannot assess read as gaps rather than as empty land."
+        )
 
     st.subheader("Top candidates")
     preview_cols = [
@@ -610,16 +874,18 @@ with tab_priority:
     )
 
     display_cols = [
-        "scope_rank", "site_id", "display_score", "priority_score", "demographic_stratum",
-        "macro_region", "off_grid_score_n", "solar_score_n", "community_impact_n",
-        "access_ease_n", "expected_abatement_tco2e", "indicative_opex_saving_usd",
-        "population_total",
+        "scope_rank", "site_id", "latitude", "longitude", "display_score", "priority_score",
+        "demographic_stratum", "macro_region", "off_grid_score_n", "solar_score_n",
+        "community_impact_n", "access_ease_n", "expected_abatement_tco2e",
+        "indicative_opex_saving_usd", "population_total",
     ]
     table = shortlist[[c for c in display_cols if c in shortlist.columns]].copy()
     table = table.rename(
         columns={
             "scope_rank": "Scope rank",
             "site_id": "Tile ID",
+            "latitude": "Latitude",
+            "longitude": "Longitude",
             "display_score": "Displayed score",
             "priority_score": "Pipeline score",
             "demographic_stratum": "Settlement",
@@ -633,9 +899,34 @@ with tab_priority:
             "population_total": "Population associated",
         }
     )
-    st.dataframe(table.round(3), hide_index=True, use_container_width=True, height=360)
+    # Coordinates are held at 6 dp and kept out of the 3-dp rounding applied to the scores.
+    # At this latitude 3 dp is roughly 110 m and an analysis tile is about 600 m across, so
+    # a rounded coordinate can point at the wrong tile — which defeats the purpose of
+    # shipping it to a survey team.
+    for _c in ("Latitude", "Longitude"):
+        if _c in table.columns:
+            table[_c] = table[_c].astype(float).round(6)
 
-    csv_bytes = table.to_csv(index=False).encode("utf-8")
+    shown = table.copy()
+    _round = shown.select_dtypes("number").columns.difference(["Latitude", "Longitude"])
+    shown[_round] = shown[_round].round(3)
+
+    st.dataframe(
+        shown,
+        hide_index=True,
+        use_container_width=True,
+        height=360,
+        column_config={
+            "Latitude": st.column_config.NumberColumn(format="%.5f"),
+            "Longitude": st.column_config.NumberColumn(format="%.5f"),
+        },
+    )
+    st.caption(
+        "Coordinates are the analysis-tile centroid — a search area of roughly 600 m, not a "
+        "surveyed tower position."
+    )
+
+    csv_bytes = shown.to_csv(index=False).encode("utf-8")
     st.download_button(
         "Download current shortlist (CSV)",
         csv_bytes,
@@ -653,8 +944,21 @@ with tab_priority:
         )
         for r in shortlist.itertuples()
     }
-    selected_id = st.selectbox("Candidate", list(labels), format_func=labels.get)
+    pick_col, brief_col = st.columns([2.4, 1.0])
+    with pick_col:
+        selected_id = st.selectbox("Candidate", list(labels), format_func=labels.get)
     row = shortlist[shortlist["site_id"].astype(str).eq(selected_id)].iloc[0]
+    with brief_col:
+        st.write("")
+        st.download_button(
+            "Download field brief",
+            site_brief_html(row, country_label, scope_text).encode("utf-8"),
+            file_name=f"site_brief_{country_key}_{selected_id}.html",
+            mime="text/html",
+            use_container_width=True,
+            help="One-page printable brief for the survey engineer, with space to record "
+                 "what they find on site.",
+        )
 
     left, right = st.columns([1.15, 1.0])
 

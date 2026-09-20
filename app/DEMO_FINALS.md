@@ -173,3 +173,26 @@ Community-first 75%.** Useful if a judge asks how sensitive the ranking is.
 Full run with a stopwatch, twice today and twice tomorrow. The two beats to make
 automatic are the Geography switch in Move 2 — drag, silence, let the number land — and
 the per-stratum honesty in Move 4.
+
+---
+
+## UPDATE — 20 Sep · what changed in the dashboard
+
+Three things now do work the script used to do with words.
+
+**The evidence layer is on the landing map.** Grey = masked for thin evidence, pale olive =
+above baseline and excluded, green = eligible to rank, rings = shortlist. Borneo now reads
+as visibly grey the moment the page loads. Open on Overview and let it sit for two seconds
+before speaking — the map makes your argument before you do.
+
+**The KPIs show deltas.** Change scope and the abatement figure carries a green +66 (+21%).
+Point at the delta, not at the number. The judge watches the consequence happen rather than
+being asked to remember 308.
+
+**There is a field brief.** In the candidate inspector, "Download field brief" produces a
+one-page printable document for the survey engineer — pillar scores, site context,
+provenance warnings, and a blank survey record with sign-off lines. Open one on stage. It
+is the difference between showing a ranking and showing a deliverable.
+
+**Region labels** are on the map now, so judges who don't know Malaysian geography can
+follow the Sabah and Sarawak argument.

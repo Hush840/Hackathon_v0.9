@@ -1,0 +1,27 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+.ipynb_checkpoints/
+data/NEW/
+
+# --- Internal pitch preparation. Judges read this repository; these are ours. ---
+app/SHOWDOWN_SCRIPT.md
+app/SHOWDOWN_7MIN.md
+app/FINALS_DAY_PLAN.md
+app/FINALS_PLAN.md
+app/QA_BANK.md
+app/REFERENCES.md
+app/PROJECT_BRIEF.md
+
+# Stray duplicate of .streamlit/config.toml
+.streamlit_config_ALSO_PUT_AT_REPO_ROOT.toml
+
+# Working / staging folders
+app/_incoming/
+app/_incoming_12aug/
+app/_rejected_export/
+app/_v1_backup/
+_writetest
