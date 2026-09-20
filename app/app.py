@@ -341,6 +341,72 @@ def priority_legend_html(n_ranked=None, n_masked=None) -> str:
     """
 
 
+# -----------------------------------------------------------------------------
+# Indicative conversion sizing and local air quality
+#
+# Screening arithmetic only. Array sizing is what HOMER Pro and an engineer do properly
+# once a site is confirmed; this exists so the shortlist carries an order-of-magnitude
+# answer to "how big would it be", not so it replaces a design.
+# -----------------------------------------------------------------------------
+
+DIESEL_L_YR = 13_000        # GSMA, Tower Power Africa
+GENSET_KWH_PER_L = 2.0      # conservative part-load genset efficiency
+SOLAR_SHARE = 0.65          # GSMA solar-hybrid displacement
+PERF_RATIO = 0.75           # tropical derate: heat, soiling, inverter, wiring
+MODULE_EFF = 0.22           # module efficiency at STC
+PANEL_W = 550               # a current utility-scale module
+
+# g per kWh of diesel generation avoided. Regulatory bands, not site measurements.
+POLLUTANT_G_PER_KWH = {
+    "NOx": (4.0, 10.0),
+    "PM2.5": (0.2, 0.5),
+    "SO₂": (0.1, 0.4),
+}
+
+
+def conversion_sizing(row) -> dict | None:
+    """Indicative solar array and avoided local pollutants for one candidate.
+
+    Returns None where the site has no usable irradiance value, rather than inventing one.
+    Array size is deliberately NOT scaled by off-grid likelihood: if the site turns out to
+    be off-grid, that is the array it needs regardless of our prior confidence. Avoided
+    pollutants ARE scaled, to stay consistent with the abatement and OPEX figures.
+    """
+    try:
+        mj = float(row.get("solar_radiation_mj", float("nan")))
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(mj) or mj <= 0:
+        return None
+
+    ghi = mj / 3.6 / 30.4                       # MJ/m2/month -> kWh/m2/day
+    yield_per_kwp = ghi * PERF_RATIO
+    if yield_per_kwp <= 0:
+        return None
+
+    load_day = DIESEL_L_YR * GENSET_KWH_PER_L / 365.0
+    kwp = load_day * SOLAR_SHARE / yield_per_kwp
+
+    try:
+        likelihood = float(np.clip(float(row.get("off_grid_likelihood", 0.0)), 0.0, 1.0))
+    except (TypeError, ValueError):
+        likelihood = 0.0
+    kwh_avoided = DIESEL_L_YR * GENSET_KWH_PER_L * SOLAR_SHARE * likelihood
+
+    return {
+        "ghi": ghi,
+        "kwp": kwp,
+        "panels": int(np.ceil(kwp * 1000.0 / PANEL_W)),
+        "panel_area": kwp / MODULE_EFF,
+        "ground_area": kwp / MODULE_EFF * 1.4,
+        "kwh_avoided": kwh_avoided,
+        "pollutants": {
+            name: (kwh_avoided * lo / 1000.0, kwh_avoided * hi / 1000.0)
+            for name, (lo, hi) in POLLUTANT_G_PER_KWH.items()
+        },
+    }
+
+
 def site_brief_html(row, country_label: str, scope_text: str) -> str:
     """One-page field brief for a single candidate. Opens and prints from a browser.
 
@@ -384,6 +450,34 @@ def site_brief_html(row, country_label: str, scope_text: str) -> str:
            ("Settlement type", str(row.get("demographic_stratum", "—"))),
            ("Region", str(row.get("macro_region", "—")))]
     ctx_html = "".join(f"<tr><td>{k}</td><td class='v'>{v}</td></tr>" for k, v in ctx)
+
+    # Indicative sizing goes on the brief because it is what the surveyor is being sent to
+    # sanity-check on the ground: is there anywhere to put roughly this much panel?
+    sz = conversion_sizing(row)
+    if sz is None:
+        sizing_html = ""
+    else:
+        air_rows = "".join(
+            f"<tr><td>{name}</td><td class='v'>{lo:,.1f} – {hi:,.1f} kg/yr</td></tr>"
+            for name, (lo, hi) in sz["pollutants"].items()
+        )
+        sizing_html = f"""
+<h2>Indicative conversion sizing</h2>
+<div class="grid">
+  <div class="kpi"><b>{sz['kwp']:.1f} kWp</b><span>solar array to carry 65% of load</span></div>
+  <div class="kpi"><b>{sz['panels']} panels</b><span>at {PANEL_W} W each</span></div>
+  <div class="kpi"><b>{sz['ground_area']:.0f} m²</b><span>ground incl. spacing and access</span></div>
+</div>
+<p class="sub">Sized from this site's irradiance of {sz['ghi']:.2f} kWh/m²/day at a
+{PERF_RATIO:.2f} performance ratio. <strong>Confirm on site that a clear area of roughly this
+size exists, and record any shading.</strong> Battery autonomy, load profile and generator
+run-hours are for the engineering model, not this brief.</p>
+
+<h2>Indicative local air quality</h2>
+<table>{air_rows}</table>
+<p class="sub">From {sz['kwh_avoided']:,.0f} kWh/yr of diesel generation displaced, scaled by
+inferred off-grid likelihood. Ranges are Tier 2 / Stage IIIA non-road emission bands, not
+measurements at this site. Converting to solar does not change the tower's RF emissions.</p>"""
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Site brief — {row.get('site_id')}</title><style>
@@ -439,6 +533,8 @@ data, not observed. This brief authorises a site survey, not an investment decis
 </div>
 <p class="sub">Published-average estimates scaled by inferred off-grid likelihood. Not an
 engineering design and not a business case.</p>
+
+{sizing_html}
 
 <h2>Site context</h2>
 <table>{ctx_html}</table>
@@ -1024,6 +1120,47 @@ with tab_priority:
             "off-grid likelihood. The diesel pillar shown in the priority score is a relative "
             "percentile rank within the eligible candidate population."
         )
+
+        _sz = conversion_sizing(row)
+        if _sz is not None:
+            st.markdown("#### Indicative conversion sizing")
+            z1, z2 = st.columns(2)
+            z1.metric(
+                "Solar array",
+                f"{_sz['kwp']:.1f} kWp",
+                help="Sized from this tile's own irradiance to carry 65% of a 13,000 L/yr "
+                     "diesel load. Not scaled by off-grid likelihood — if the site is "
+                     "confirmed off-grid, this is the array it needs.",
+            )
+            z2.metric(
+                "Panels / footprint",
+                f"{_sz['panels']} · {_sz['panel_area']:.0f} m²",
+                help=f"{PANEL_W} W modules at {MODULE_EFF:.0%} efficiency. Allow about "
+                     f"{_sz['ground_area']:.0f} m² of ground including spacing and access.",
+            )
+            st.caption(
+                f"Site irradiance {_sz['ghi']:.2f} kWh/m²/day · performance ratio "
+                f"{PERF_RATIO:.2f}. Screening estimate — battery autonomy, load profile and "
+                "generator run-hours are for the engineering model, not this tool."
+            )
+
+            st.markdown("#### Indicative local air quality")
+            air = pd.DataFrame(
+                {
+                    "Pollutant": list(_sz["pollutants"]),
+                    "Avoided per year": [
+                        f"{lo:,.1f} – {hi:,.1f} kg"
+                        for lo, hi in _sz["pollutants"].values()
+                    ],
+                }
+            )
+            st.dataframe(air, hide_index=True, use_container_width=True)
+            st.caption(
+                f"From {_sz['kwh_avoided']:,.0f} kWh/yr of on-site diesel generation displaced, "
+                "scaled by inferred off-grid likelihood. Ranges come from Tier 2 / Stage IIIA "
+                "non-road emission bands, not from measurement at this site. Converting to "
+                "solar does not change the tower's RF emissions."
+            )
 
         st.markdown("#### Site context")
         context = pd.DataFrame(
