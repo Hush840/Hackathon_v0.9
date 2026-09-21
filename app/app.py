@@ -473,10 +473,6 @@ def site_brief_html(row, country_label: str, scope_text: str) -> str:
     if sz is None:
         sizing_html = ""
     else:
-        air_rows = "".join(
-            f"<tr><td>{name}</td><td class='v'>{lo:,.1f} – {hi:,.1f} kg/yr</td></tr>"
-            for name, (lo, hi) in sz["pollutants"].items()
-        )
         sizing_html = f"""
 <h2>Indicative conversion sizing</h2>
 <div class="grid">
@@ -490,12 +486,7 @@ def site_brief_html(row, country_label: str, scope_text: str) -> str:
 {PERF_RATIO:.2f} performance ratio. <strong>Confirm on site that a clear area of roughly this
 size exists, and record any shading.</strong> Battery autonomy, load profile and generator
 run-hours are for the engineering model, not this brief.</p>
-
-<h2>Indicative local air quality</h2>
-<table>{air_rows}</table>
-<p class="sub">From {sz['kwh_avoided']:,.0f} kWh/yr of diesel generation displaced, scaled by
-inferred off-grid likelihood. Ranges are Tier 2 / Stage IIIA non-road emission bands, not
-measurements at this site. Converting to solar does not change the tower's RF emissions.</p>"""
+"""
 
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <title>Site brief — {row.get('site_id')}</title><style>
@@ -1106,21 +1097,6 @@ with tab_priority:
         if reasons:
             st.caption("Strongest pillar signals: " + " · ".join(reasons))
 
-        model_enabled = bool(row.get("model_residual_enabled", True))
-        if model_enabled and pd.notna(row.get("top_shap_driver", np.nan)):
-            st.markdown("#### Speed-model explanation")
-            shap_value = row.get("top_shap_value", np.nan)
-            shap_text = f" ({shap_value:+,.0f} kbps contribution)" if np.isfinite(shap_value) else ""
-            st.caption(
-                f"Strongest SHAP driver of the Random Forest speed prediction: **{row.top_shap_driver}**{shap_text}. "
-                "This explains the speed model, not the four-pillar priority score."
-            )
-        elif not model_enabled:
-            st.markdown("#### Speed-model explanation")
-            st.caption(
-                "ML residual contribution is bypassed for this export because the speed model did not pass "
-                "the spatial-validation guardrail. The deterministic ESG pillars remain active."
-            )
 
     with right:
         k1, k2 = st.columns(2)
@@ -1143,12 +1119,6 @@ with tab_priority:
         i3, i4 = st.columns(2)
         i3.metric("Population associated", fmt_number(row.get("population_total", np.nan), 0))
         i4.metric("People / tCO₂e", fmt_number(row.get("people_connected_per_tonne_co2", np.nan), 1))
-
-        st.caption(
-            "Indicative abatement and OPEX scale continuously with the absolute inferred "
-            "off-grid likelihood. The diesel pillar shown in the priority score is a relative "
-            "percentile rank within the eligible candidate population."
-        )
 
         _sz = conversion_sizing(row)
         if _sz is not None:
@@ -1186,24 +1156,6 @@ with tab_priority:
                 f"{PERF_RATIO:.2f} · diesel RM{MYR_DIESEL_PER_L}/L. Screening estimate — "
                 "battery autonomy, load profile, generator run-hours and battery replacement "
                 "are for the engineering model, not this tool."
-            )
-
-            st.markdown("#### Indicative local air quality")
-            air = pd.DataFrame(
-                {
-                    "Pollutant": list(_sz["pollutants"]),
-                    "Avoided per year": [
-                        f"{lo:,.1f} – {hi:,.1f} kg"
-                        for lo, hi in _sz["pollutants"].values()
-                    ],
-                }
-            )
-            st.dataframe(air, hide_index=True, use_container_width=True)
-            st.caption(
-                f"From {_sz['kwh_avoided']:,.0f} kWh/yr of on-site diesel generation displaced, "
-                "scaled by inferred off-grid likelihood. Ranges come from Tier 2 / Stage IIIA "
-                "non-road emission bands, not from measurement at this site. Converting to "
-                "solar does not change the tower's RF emissions."
             )
 
         st.markdown("#### Site context")
