@@ -1385,27 +1385,6 @@ with tab_model:
     else:
         st.info("No validated CV population is available in this export.")
 
-    st.divider()
-    st.subheader("Evidence coverage & governance")
-    tiers = full["confidence_tier"].value_counts(dropna=False).rename_axis("Confidence tier").reset_index(name="Tiles")
-    st.dataframe(tiers, hide_index=True, use_container_width=True)
-
-    e1, e2, e3, e4 = st.columns(4)
-    e1.metric("All observed tiles", f"{len(full):,}")
-    e2.metric("Ranked / approved", f"{int(full['rankable'].sum()):,}")
-    e3.metric("Held back", f"{int((~full['rankable']).sum()):,}")
-    e4.metric("Median Ookla tests", f"{full['tests'].median():.0f}" if "tests" in full else "—")
-
-    st.caption(
-        "Blank or masked areas mean insufficient measurement, not absence of mobile coverage. The dashboard keeps the governance distinction visible rather than converting missing evidence into zero."
-    )
-
-    if "demographic_stratum" in full.columns and "tests" in full.columns:
-        st.bar_chart(
-            full.groupby("demographic_stratum")["tests"].median(),
-            y_label="Median Ookla tests",
-            x_label="Settlement type",
-        )
 
 
 
