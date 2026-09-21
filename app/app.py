@@ -356,6 +356,16 @@ PERF_RATIO = 0.75           # tropical derate: heat, soiling, inverter, wiring
 MODULE_EFF = 0.22           # module efficiency at STC
 PANEL_W = 550               # a current utility-scale module
 
+# Malaysian cost basis, back-solved from the team's single-site case:
+#   RM98,000 installed PV + storage at 12.1 kWp  ->  RM8,100 / kWp
+#   plus a fixed RM10,000 for logistics and civil works
+# Diesel at RM5.27/L (unsubsidised, Sept 2026) x 13,000 L x 65% displaced
+# = RM44,532 saved per year IF the site is confirmed off-grid.
+MYR_PER_KWP = 8_100
+MYR_MOBILISATION = 10_000
+MYR_DIESEL_PER_L = 5.27
+
+
 # g per kWh of diesel generation avoided. Regulatory bands, not site measurements.
 POLLUTANT_G_PER_KWH = {
     "NOx": (4.0, 10.0),
@@ -393,9 +403,15 @@ def conversion_sizing(row) -> dict | None:
         likelihood = 0.0
     kwh_avoided = DIESEL_L_YR * GENSET_KWH_PER_L * SOLAR_SHARE * likelihood
 
+    capex = kwp * MYR_PER_KWP + MYR_MOBILISATION
+    annual_saving = DIESEL_L_YR * MYR_DIESEL_PER_L * SOLAR_SHARE
+
     return {
         "ghi": ghi,
         "kwp": kwp,
+        "capex_myr": capex,
+        "saving_myr": annual_saving,
+        "payback_yr": capex / annual_saving if annual_saving else float("nan"),
         "panels": int(np.ceil(kwp * 1000.0 / PANEL_W)),
         "panel_area": kwp / MODULE_EFF,
         "ground_area": kwp / MODULE_EFF * 1.4,
@@ -467,6 +483,8 @@ def site_brief_html(row, country_label: str, scope_text: str) -> str:
   <div class="kpi"><b>{sz['kwp']:.1f} kWp</b><span>solar array to carry 65% of load</span></div>
   <div class="kpi"><b>{sz['panels']} panels</b><span>at {PANEL_W} W each</span></div>
   <div class="kpi"><b>{sz['ground_area']:.0f} m²</b><span>ground incl. spacing and access</span></div>
+  <div class="kpi"><b>RM {sz['capex_myr']:,.0f}</b><span>indicative installed cost</span></div>
+  <div class="kpi"><b>{sz['payback_yr']:.1f} yr</b><span>simple payback if confirmed off-grid</span></div>
 </div>
 <p class="sub">Sized from this site's irradiance of {sz['ghi']:.2f} kWh/m²/day at a
 {PERF_RATIO:.2f} performance ratio. <strong>Confirm on site that a clear area of roughly this
@@ -512,11 +530,11 @@ footer{{margin-top:26px;color:#8a9691;font-size:10.5px;border-top:1px solid #ece
 </style></head><body>
 <div class="hdr">
   <div class="rank">{scope_text} · Priority #{int(row.get('scope_rank', 0))}</div>
-  <h1>Candidate site brief</h1>
+  <h1>Site brief</h1>
   <div class="sub">Tile {row.get('site_id')} · {country_label} ·
     {n(row.get('latitude'), 4)}, {n(row.get('longitude'), 4)}</div>
 </div>
-<div class="banner">CANDIDATE — VALIDATION REQUIRED. Off-grid status is inferred from open
+<div class="banner">UNCONFIRMED SITE — VALIDATION REQUIRED. Off-grid status is inferred from open
 data, not observed. This brief authorises a site survey, not an investment decision.</div>
 
 <h2>Why this site ranks here</h2>
@@ -761,7 +779,7 @@ if strategy != "Balanced — pipeline default":
     )
 
 if scoped.empty:
-    st.warning("No evidence-qualified candidates remain under the selected policy/geography scope.")
+    st.warning("No evidence-qualified sites remain under the selected policy/geography scope.")
     st.stop()
 
 # -----------------------------------------------------------------------------
@@ -807,7 +825,7 @@ with tab_overview:
         return out
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Candidates in scope", f"{len(scoped):,}", _delta("scope"))
+    m1.metric("Sites in scope", f"{len(scoped):,}", _delta("scope"))
     m2.metric("Shortlisted", f"{len(shortlist):,}", _delta("short", pct=False))
     m3.metric(
         "Indicative abatement",
@@ -931,7 +949,7 @@ with tab_overview:
             "so the places we cannot assess read as gaps rather than as empty land."
         )
 
-    st.subheader("Top candidates")
+    st.subheader("Top sites")
     preview_cols = [
         "scope_rank", "site_id", "display_score", "demographic_stratum",
         "macro_region", "expected_abatement_tco2e", "population_total",
@@ -1028,7 +1046,7 @@ with tab_priority:
     )
 
     st.divider()
-    st.subheader("Inspect a candidate")
+    st.subheader("Inspect a site")
 
     labels = {
         str(r.site_id): (
@@ -1039,7 +1057,7 @@ with tab_priority:
     }
     pick_col, brief_col = st.columns([2.4, 1.0])
     with pick_col:
-        selected_id = st.selectbox("Candidate", list(labels), format_func=labels.get)
+        selected_id = st.selectbox("Site", list(labels), format_func=labels.get)
     row = shortlist[shortlist["site_id"].astype(str).eq(selected_id)].iloc[0]
     with brief_col:
         st.write("")
@@ -1060,7 +1078,7 @@ with tab_priority:
             f"""
             <div class="site-card">
               <div class="muted">{policy_scope} priority</div>
-              <h2 style="margin:.15rem 0 .25rem 0">#{int(row.scope_rank)} · Candidate location</h2>
+              <h2 style="margin:.15rem 0 .25rem 0">#{int(row.scope_rank)} · Site</h2>
               <div class="muted">Tile {row.site_id} · {row.demographic_stratum} · {row.macro_region}</div>
             </div>
             """,
@@ -1149,10 +1167,25 @@ with tab_priority:
                 help=f"{PANEL_W} W modules at {MODULE_EFF:.0%} efficiency. Allow about "
                      f"{_sz['ground_area']:.0f} m² of ground including spacing and access.",
             )
+            z3, z4 = st.columns(2)
+            z3.metric(
+                "Installed cost",
+                f"RM {_sz['capex_myr']:,.0f}",
+                help=f"RM{MYR_PER_KWP:,}/kWp for PV plus storage, at Malaysian commercial "
+                     f"rates, plus RM{MYR_MOBILISATION:,} for logistics and civil works.",
+            )
+            z4.metric(
+                "Simple payback",
+                f"{_sz['payback_yr']:.1f} years",
+                help=f"Against RM{_sz['saving_myr']:,.0f}/yr of diesel displaced — 13,000 L "
+                     f"at RM{MYR_DIESEL_PER_L}/L, 65% replaced. Assumes the site is confirmed "
+                     "off-grid. Excludes battery replacement.",
+            )
             st.caption(
                 f"Site irradiance {_sz['ghi']:.2f} kWh/m²/day · performance ratio "
-                f"{PERF_RATIO:.2f}. Screening estimate — battery autonomy, load profile and "
-                "generator run-hours are for the engineering model, not this tool."
+                f"{PERF_RATIO:.2f} · diesel RM{MYR_DIESEL_PER_L}/L. Screening estimate — "
+                "battery autonomy, load profile, generator run-hours and battery replacement "
+                "are for the engineering model, not this tool."
             )
 
             st.markdown("#### Indicative local air quality")
@@ -1207,10 +1240,10 @@ with tab_priority:
             for warning in warnings:
                 st.warning(warning)
         else:
-            st.success("No infrastructure-missing flags are raised for this candidate.")
+            st.success("No infrastructure-missing flags are raised for this site.")
 
         st.info(
-            "Candidate only — inferred energy status and public-data proxies must be confirmed by the operator and a field survey before any investment decision."
+            "Unconfirmed site — inferred energy status and public-data proxies must be confirmed by the operator and a field survey before any investment decision."
         )
 
 
@@ -1266,36 +1299,6 @@ with tab_model:
         "RF is trained on the verified underserved candidate population. The ML connectivity residual is "
         "allowed into Community Impact only when spatial validation passes the guardrail."
     )
-
-    # Mentor question: "what percentage is train and what percentage is validation?"
-    # There is no fixed split, and the reason why is the substantive answer.
-    if len(cv) and "spatial_block" in cv.columns:
-        _folds = int(cv["spatial_block"].nunique())
-        _per_fold = len(cv) / _folds if _folds else 0
-        _test_pct = 100.0 * _per_fold / max(len(cv), 1)
-        with st.expander("How the train / validation split works"):
-            st.markdown(
-                f"""
-                There is no fixed 80/20 split. Validation is **{_folds}-fold
-                leave-one-block-out** over 0.5° spatial blocks — roughly 55 km squares.
-
-                | | |
-                |---|---|
-                | Folds | {_folds} |
-                | Train, per fold | **{100 - _test_pct:.1f}%** ({len(cv) - _per_fold:,.0f} tiles) |
-                | Validate, per fold | **{_test_pct:.1f}%** ({_per_fold:,.0f} tiles, one whole block) |
-                | Coverage | every tile predicted exactly once, out-of-block |
-
-                **Why not a random 80/20?** Because geographic data leaks. Two towers 2 km
-                apart share terrain, population and often the same equipment — put one in
-                train and one in test and the model scores well by memorising
-                neighbourhoods rather than learning anything transferable. Holding out a
-                whole 55 km block forces prediction on a region the model has never seen.
-
-                The cost of that honesty is visible above: **out-of-block R² is lower than
-                in-sample**, and the lower number is the one reported.
-                """
-            )
 
     if not has_explicit_model_status and len(cv):
         st.info(
@@ -1404,17 +1407,6 @@ with tab_model:
             x_label="Settlement type",
         )
 
-    st.divider()
-    st.subheader("Ranking sensitivity")
-    s1, s2 = st.columns(2)
-    s1.metric(
-        f"Top-{min(shortlist_n, len(shortlist))} overlap vs pipeline default",
-        f"{strategy_overlap:.0f}%",
-    )
-    s2.metric("Current strategy", strategy.replace(" — pipeline default", ""))
-    st.caption(
-        "Alternative weight settings are stress tests. They never silently replace the production priority_score."
-    )
 
 
 # -----------------------------------------------------------------------------
